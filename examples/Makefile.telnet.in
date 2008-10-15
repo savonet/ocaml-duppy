@@ -1,0 +1,10 @@
+SOURCES = telnet.ml
+RESULT = telnet
+INCDIRS = ../src @ALL_INC@
+OCAMLC = @OCAMLC@ -thread
+OCAMLOPT = @OCAMLOPT@ -thread
+LIBS = @all_requires@ duppy
+
+all: nc
+
+-include OCamlMakefile

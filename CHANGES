@@ -1,0 +1,17 @@
+0.1.2 (01-07-2008)
+=====
+* Changed logic in shutdown for Async interface:
+  now [Duppy.Async.shutdown t] also wakes the task if
+  asleep. Still it can't stop a running task.
+* Fixed race conditions when a queue starts the select loop:
+  a task could be submitted, but no queue would wake up.
+
+0.1.1 (15-04-2008)
+=====
+* Fixed Conditions usage for non-unix systems
+* Fixed typos in the documentation, added some details
+* Installs .cmx file
+
+0.1.0 (07-03-2008) 
+=====
+* Initial release

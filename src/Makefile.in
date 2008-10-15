@@ -1,0 +1,55 @@
+# Copyright (C) 2005-2006 Savonet team
+# lastfm bindings for OCaml.
+#
+# by Samuel Mimram and Romain Beauxis
+
+# $Id: Makefile.in 2383 2006-04-09 16:21:04Z smimram $
+
+OCAMLMAKEFILE = OCamlMakefile
+
+OCAMLFIND = @OCAMLFIND@
+OCAMLFIND_LDCONF = @OCAMLFIND_LDCONF@
+OCAMLC = @OCAMLC@ -thread
+OCAMLOPT = @OCAMLOPT@ -thread
+BEST = @BEST@
+OCAMLMKTOP = @OCAMLMKTOP@
+OCAMLCP = @OCAMLCP@
+OCAMLDEP = @OCAMLDEP@
+OCAMLLEX = @OCAMLLEX@
+OCAMLYACC = @OCAMLYACC@
+OCAMLDOC = @OCAMLDOC@
+LATEX = @LATEX@
+DVIPS = @DVIPS@
+PS2PDF = @PS2PDF@
+OCAMLLIBPATH = @CAMLLIBPATH@
+
+SOURCES = duppy.ml duppy.mli
+RESULT = duppy
+OCAMLDOCFLAGS = -stars
+LIBINSTALL_FILES = $(wildcard *.mli *.cmi *.cma *.cmxa *.cmx *.a *.so)
+ACLIBS = @LIBS@
+LDFLAGS = @LDFLAGS@
+CLIBS = $(ACLIBS:-l%=%)
+CC = @CC@
+CFLAGS = @CFLAGS@ -Wall -DCAML_NAME_SPACE
+CPPFLAGS = @CPPFLAGS@
+INCDIRS = @INC@ 
+
+
+all: $(BEST)
+
+byte: byte-code-library
+
+opt: native-code-library
+
+htdoc:
+	mkdir -p doc/html
+	ocamldoc -html -d doc/html
+
+install: libinstall
+
+uninstall: libuninstall
+
+update: uninstall install
+
+-include $(OCAMLMAKEFILE)

@@ -1,0 +1,6 @@
+name="duppy"
+version="@VERSION@"
+description="OCaml advanced scheduler"
+requires="@requires@"
+archive(byte)="duppy.cma"
+archive(native)="duppy.cmxa"
