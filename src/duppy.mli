@@ -123,8 +123,11 @@ sig
   (** [add ~priority s f] creates an asynchronous task in [s] with
     * priority [priority].
     *
-    * The task executes the function [f], and go to sleep.
-    * Use [wake_up] to resume the task and execute [f] again. *)
+    * The task executes the function [f], and goes to sleep.
+    * Use [wake_up] to resume the task and execute [f] again. 
+    * Only a single call to [f] is done at each time. 
+    * Multiple [wake_up] while previous task has not 
+    * finished will result in sequentialized calls to [f]. *)
   val add : priority:'a -> 'a scheduler -> (unit -> unit) -> t
 
   (** Wake up an asynchronous task. 
