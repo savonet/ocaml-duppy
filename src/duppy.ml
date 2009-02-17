@@ -312,10 +312,10 @@ struct
   let wake_up (_,t) =
     match !t with
       | Some t -> ignore (Unix.write t " " 0 1)
-      | None -> raise Stoped
+      | None -> raise Stopped
 
   let stop (b,t) = 
-    if !t = None then raise Stoped;
+    if !t = None then raise Stopped;
     b := true ;
     wake_up (b,t) ;
     t := None
