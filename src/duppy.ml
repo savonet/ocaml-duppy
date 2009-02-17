@@ -274,7 +274,7 @@ module Async =
 struct
   type t = (bool ref*fd option ref)
 
-  exception Stoped
+  exception Stopped
 
   let add ~priority (scheduler:'a scheduler) f = 
    (* A pipe to wake up the task *)

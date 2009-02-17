@@ -117,8 +117,8 @@ sig
   type t
 
   (** Exception raised when trying to wake_up a task 
-    * that has been previously stoped *)
-  exception Stoped
+    * that has been previously stopped *)
+  exception Stopped
 
   (** [add ~priority s f] creates an asynchronous task in [s] with
     * priority [priority].
