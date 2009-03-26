@@ -15,7 +15,7 @@ distclean: clean
 	$(MAKE) -C examples clean
 
 doc:
-	make -C src htdoc
+	$(MAKE) -C src htdoc
 	mkdir -p doc
 	rm -rf doc/html
 	mv src/doc/duppy/html doc

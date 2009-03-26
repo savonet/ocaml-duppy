@@ -1,3 +1,7 @@
+0.2.1 ()
+=====
+* Fixed Makefile for BSD: call $(MAKE) for generating documentation.
+
 0.2.0 (17-02-2009)
 =====
 * Fixed typo in Duppy.Async: exception is now Stopped.
