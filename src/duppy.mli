@@ -123,12 +123,14 @@ sig
   (** [add ~priority s f] creates an asynchronous task in [s] with
     * priority [priority].
     *
-    * The task executes the function [f], and goes to sleep.
-    * Use [wake_up] to resume the task and execute [f] again. 
+    * The task executes the function [f].
+    * If the task returns a positive float, the function will be executed
+    * again after this delay. Otherwise it goes to sleep, and 
+    * you can use wake_up] to resume the task and execute [f] again. 
     * Only a single call to [f] is done at each time. 
     * Multiple [wake_up] while previous task has not 
     * finished will result in sequentialized calls to [f]. *)
-  val add : priority:'a -> 'a scheduler -> (unit -> unit) -> t
+  val add : priority:'a -> 'a scheduler -> (unit -> float) -> t
 
   (** Wake up an asynchronous task. 
     * Raises [Stoped] if the task has been stoped. *)

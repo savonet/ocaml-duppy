@@ -281,9 +281,9 @@ struct
    let out_pipe,in_pipe = Unix.pipe () in
    let stop = ref false in
    let rec task l =
-      assert (List.exists ((=) (`Read out_pipe)) l) ;
-      (* Consume a character in the pipe *)
-      ignore (Unix.read out_pipe " " 0 1) ;
+      if List.exists ((=) (`Read out_pipe)) l then
+        (* Consume a character in the pipe *)
+        ignore (Unix.read out_pipe " " 0 1) ;
       if !stop then begin
         begin 
           try
@@ -293,9 +293,15 @@ struct
         [] 
       end
       else begin
-        f () ;
+        let delay = f () in
+        let event = 
+          if delay >= 0. then
+            [`Delay delay ]
+          else
+            []
+        in
         [{ priority = priority ;
-           events = [`Read out_pipe] ;
+           events = `Read out_pipe :: event ;
            handler = task }]
       end
    in
