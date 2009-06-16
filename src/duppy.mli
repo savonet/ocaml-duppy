@@ -133,11 +133,11 @@ sig
   val add : priority:'a -> 'a scheduler -> (unit -> float) -> t
 
   (** Wake up an asynchronous task. 
-    * Raises [Stoped] if the task has been stoped. *)
+    * Raises [Stopped] if the task has been stopped. *)
   val wake_up : t -> unit
 
   (** Stop and remove the asynchronous task. Doesn't quit a running task. 
-    * Raises [Stoped] if the task has been stoped. *)
+    * Raises [Stopped] if the task has been stopped. *)
   val stop : t -> unit
 end
 
