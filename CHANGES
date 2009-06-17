@@ -1,5 +1,6 @@
 0.3.1 ()
 =====
+* Added support for --enable-debugging configure option
 * Fixed Makefile for BSD: call $(MAKE) for generating documentation.
 * Added the possibility to restart the task after the returned positive
   delay in Async.
