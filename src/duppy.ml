@@ -357,7 +357,6 @@ struct
                     [],acc
                   else
                     begin
-                      let l = ref [] in
                       (* Extract last matched field if 
                        * not followed by a delimiter *)
                       let ret,s = 
@@ -365,33 +364,31 @@ struct
                           | Pcre.Text s :: l -> List.rev l,s
                           | _ -> ret,""
                       in
-                      let process e = 
+                      let process l e = 
                         match e with
-                          | Pcre.Text s -> l := s :: !l
-                          | _ -> ()
+                          | Pcre.Text s -> s :: l
+                          | _ -> l
                       in
-                      List.iter process ret ;
+                      let l = 
+                        List.fold_left process [] ret 
+                      in
                       if not recursive then
-                        List.rev (s :: !l),""
+                        List.rev (s :: l),""
                       else
-                        List.rev !l,s
+                        List.rev l,s
                     end
             | Length n when n <= String.length acc -> 
                let len = String.length acc in
-               let ret = ref len in
-               let l = ref [] in
-               while !ret >= n do
-                 l := (String.sub acc (len - !ret) n) :: !l ;
-                 ret := !ret - n
-               done ;
-               let s = String.sub acc (len - !ret) !ret in
+               let rec f ret l =
+                 if ret >= n then (l,ret)
+                 else f (ret-n) ((String.sub acc (len - ret) n) :: l)
+               in
+               let l,ret = f len [] in
+               let s = String.sub acc (len - ret) ret in
                if not recursive then
-                 begin
-                   l := s :: !l;
-                   List.rev !l,""
-                 end
+                   List.rev (s::l),""
                else
-                 List.rev !l,s
+                 List.rev l,s
             | _ -> [],acc
         in
           if l <> [] then
