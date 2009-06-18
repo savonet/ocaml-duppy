@@ -126,7 +126,7 @@ sig
     * The task executes the function [f].
     * If the task returns a positive float, the function will be executed
     * again after this delay. Otherwise it goes to sleep, and 
-    * you can use wake_up] to resume the task and execute [f] again. 
+    * you can use [wake_up] to resume the task and execute [f] again. 
     * Only a single call to [f] is done at each time. 
     * Multiple [wake_up] while previous task has not 
     * finished will result in sequentialized calls to [f]. *)
