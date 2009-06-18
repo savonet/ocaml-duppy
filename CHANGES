@@ -4,6 +4,7 @@
 * Fixed Makefile for BSD: call $(MAKE) for generating documentation.
 * Added the possibility to restart the task after the returned positive
   delay in Async.
+* Added unknown exceptions on Duppy.Io when calling on_error.
 
 0.2.0 (17-02-2009)
 =====
