@@ -330,85 +330,90 @@ end
 module Io = 
 struct
   type marker = Length of int | Split of string
-  type failure = Int of int | Unix of Unix.error*string*string
+  type failure = Int of int | Unix of Unix.error*string*string | Unknown of exn
 
   let read ?(recursive=false) ?(init="") ?(on_error=fun _ -> ())
            ~priority (scheduler:'a scheduler) socket marker exec = 
     let rec f acc l =
-      try
-        assert (List.exists ((=) (`Read socket)) l) ;
-        let length =
+      assert (List.exists ((=) (`Read socket)) l) ;
+      let length =
+        match marker with
+          | Length n -> n - (String.length acc)
+          | _ -> 100
+      in
+      let buf = String.make length ' ' in
+      let input = Unix.read socket buf 0 length in
+      if input<=0 then (on_error (Int input) ; [])
+      else
+        let acc = acc ^ (String.sub buf 0 input) in
+        let l,acc = 
           match marker with
-            | Length n -> n - (String.length acc)
-            | _ -> 100
+            | Split r ->
+                  let rex = Pcre.regexp r in
+                  let ret = Pcre.full_split ~rex acc in
+                  (* A matched split list must contain at least 
+                   * a text and a separator *)
+                  if List.length ret < 2 then
+                    [],acc
+                  else
+                    begin
+                      let l = ref [] in
+                      (* Extract last matched field if 
+                       * not followed by a delimiter *)
+                      let ret,s = 
+                        match List.rev ret with
+                          | Pcre.Text s :: l -> List.rev l,s
+                          | _ -> ret,""
+                      in
+                      let process e = 
+                        match e with
+                          | Pcre.Text s -> l := s :: !l
+                          | _ -> ()
+                      in
+                      List.iter process ret ;
+                      if not recursive then
+                        List.rev (s :: !l),""
+                      else
+                        List.rev !l,s
+                    end
+            | Length n when n <= String.length acc -> 
+               let len = String.length acc in
+               let ret = ref len in
+               let l = ref [] in
+               while !ret >= n do
+                 l := (String.sub acc (len - !ret) n) :: !l ;
+                 ret := !ret - n
+               done ;
+               let s = String.sub acc (len - !ret) !ret in
+               if not recursive then
+                 begin
+                   l := s :: !l;
+                   List.rev !l,""
+                 end
+               else
+                 List.rev !l,s
+            | _ -> [],acc
         in
-        let buf = String.make length ' ' in
-        let input = Unix.read socket buf 0 length in
-        if input<=0 then (on_error (Int input) ; [])
-        else
-          let acc = acc ^ (String.sub buf 0 input) in
-          let l,acc = 
-            match marker with
-              | Split r ->
-                    let rex = Pcre.regexp r in
-                    let ret = Pcre.full_split ~rex acc in
-                    (* A matched split list must contain at least 
-                     * a text and a separator *)
-                    if List.length ret < 2 then
-                      [],acc
-                    else
-                      begin
-                        let l = ref [] in
-                        (* Extract last matched field if 
-                         * not followed by a delimiter *)
-                        let ret,s = 
-                          match List.rev ret with
-                            | Pcre.Text s :: l -> List.rev l,s
-                            | _ -> ret,""
-                        in
-                        let process e = 
-                          match e with
-                            | Pcre.Text s -> l := s :: !l
-                            | _ -> ()
-                        in
-                        List.iter process ret ;
-                        if not recursive then
-                          List.rev (s :: !l),""
-                        else
-                          List.rev !l,s
-                      end
-              | Length n when n <= String.length acc -> 
-                 let len = String.length acc in
-                 let ret = ref len in
-                 let l = ref [] in
-                 while !ret >= n do
-                   l := (String.sub acc (len - !ret) n) :: !l ;
-                   ret := !ret - n
-                 done ;
-                 let s = String.sub acc (len - !ret) !ret in
-                 if not recursive then
-                   begin
-                     l := s :: !l;
-                     List.rev !l,""
-                   end
-                 else
-                   List.rev !l,s
-              | _ -> [],acc
-          in
-            if l <> [] then
-              begin
-                exec l ;
-                if recursive then
-                  [{ priority = priority ; events = [`Read socket] ;
-                     handler = f acc }]
-                else
-                  []
-              end
-            else
-              [{ priority = priority ; events = [`Read socket] ;
-                 handler = f acc }]
-      with  
-        | Unix.Unix_error (x,y,z) -> on_error (Unix (x,y,z)) ; []
+          if l <> [] then
+            begin
+              exec l ;
+              if recursive then
+                [{ priority = priority ; events = [`Read socket] ;
+                   handler = f acc }]
+              else
+                []
+            end
+          else
+            [{ priority = priority ; events = [`Read socket] ;
+               handler = f acc }]
+    in
+    (* Catch all exceptions.. *)
+    let f x y = 
+      try
+        f x y 
+      with
+        | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
+        | e -> on_error (Unknown e); []
     in
       let task = 
        {
@@ -422,25 +427,30 @@ struct
   let write ?(exec=fun () -> ()) ?(on_error=fun _ -> ()) ~priority
             (scheduler:'a scheduler) socket s = 
     let rec f acc l = 
-      try
-        assert (List.exists ((=) (`Write socket)) l) ;
-        let length = String.length acc in
-        let n = Unix.write socket s 0 length in
-        if n<=0 then (on_error (Int n) ; [])
+      assert (List.exists ((=) (`Write socket)) l) ;
+      let length = String.length acc in
+      let n = Unix.write socket s 0 length in
+      if n<=0 then (on_error (Int n) ; [])
+      else
+      begin
+        if n < length then
+          begin
+            let s = String.sub s n (n-length) in
+              [{ priority = priority ; events = [`Write socket] ;
+                 handler = f s }]
+          end
         else
-        begin
-          if n < length then
-            begin
-              let s = String.sub s n (n-length) in
-                [{ priority = priority ; events = [`Write socket] ;
-                   handler = f s }]
-            end
-          else
-            (exec () ; [])
-        end
-      with
-        | Unix.Unix_error (x,y,z) -> on_error (Unix (x,y,z)) ; []
+          (exec () ; [])
+      end
     in  
+    (* Catch all exceptions.. *)
+    let f x y =
+      try
+        f x y
+      with
+        | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
+        | e -> on_error (Unknown e); []
+    in
     if s <> "" then
         let task = 
           {

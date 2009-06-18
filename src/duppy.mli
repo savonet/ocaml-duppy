@@ -164,7 +164,7 @@ sig
     * [Int d] is raised when reading or writing failed.
     * the returned value is respectively the ammount of 
     * data read or written *)
-  type failure = Int of int | Unix of Unix.error*string*string
+  type failure = Int of int | Unix of Unix.error*string*string | Unknown of exn
 
   (** Wrapper to perform a read on a socket and trigger a function when
     * a marker has been detected, or enough data has been read.
