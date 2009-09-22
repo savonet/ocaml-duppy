@@ -391,6 +391,14 @@ struct
                  List.rev l,s
             | _ -> [],acc
         in
+        (* Catch all exceptions.. *)
+        let f x y =
+         try
+          f x y
+         with
+           | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
+           | e -> on_error (Unknown e); []
+        in
           if l <> [] then
             begin
               exec l ;
@@ -432,6 +440,14 @@ struct
       begin
         if n < length then
           begin
+            (* Catch all exceptions.. *)
+            let f x y =
+             try
+              f x y
+             with
+               | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
+               | e -> on_error (Unknown e); []
+            in
             let s = String.sub s n (n-length) in
               [{ priority = priority ; events = [`Write socket] ;
                  handler = f s }]

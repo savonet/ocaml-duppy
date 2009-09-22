@@ -1,3 +1,9 @@
+0.3.1 ()
+=====
+* Really catch raised exception on Duppy.Io 
+  operations: catching was missing on recurrent 
+  calls.
+
 0.3.0 (18-06-2009)
 =====
 * Added support for --enable-debugging configure option
