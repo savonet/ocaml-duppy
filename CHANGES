@@ -1,4 +1,4 @@
-0.3.1 ()
+0.3.1 (14-10-2009)
 =====
 * Really catch raised exception on Duppy.Io 
   operations: catching was missing on recurrent 
