@@ -159,7 +159,7 @@ let process s log =
            (time ()) timeout
            (List.length e.r) (List.length e.w) (List.length e.x)) ;
     let r,w,x =
-      Thread.select e.r e.w e.x timeout
+      Unix.select e.r e.w e.x timeout
     in
       log (Printf.sprintf "Left select at %f (%d/%d/%d)." (time ())
              (List.length r) (List.length w) (List.length x)) ;
@@ -197,7 +197,11 @@ let process s log =
     * this function, and is freed *only* 
     * if some task was processed. *) 
 let exec s (priorities:'a->bool) =
-  assert(not (Mutex.try_lock s.ready_m)) ;
+  (* This assertion does not work on
+   * win32 because a thread can double-lock
+   * the same mutex.. *)
+  if Sys.os_type <> "Win32" then
+    assert(not (Mutex.try_lock s.ready_m)) ;
   try
     let (_,task),remaining =
       remove

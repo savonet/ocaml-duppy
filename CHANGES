@@ -1,3 +1,14 @@
+0.3.2 ()
+=====
+* Switch from Thread.select to 
+  Unix.select. They are the same on 
+  POSIX and only Unix.select is available
+  on Win32..
+* Do not use assertions on Mutex.try_lock
+  on Win32: on this plateform, a thread can
+  double-lock a mutex, making the assertion 
+  inconsistent.
+
 0.3.1 (14-10-2009)
 =====
 * Really catch raised exception on Duppy.Io 
