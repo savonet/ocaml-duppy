@@ -1,4 +1,4 @@
-0.3.2 ()
+0.3.2 (19-08-2010)
 =====
 * Switch from Thread.select to 
   Unix.select. They are the same on 
