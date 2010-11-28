@@ -1,3 +1,10 @@
+0.3.3 ()
+=====
+* Close both sides of the pipe
+  in Duppy.Async
+* Make calls to [stop] and [wake_up]
+  thread-safe in Duppy.Async
+
 0.3.2 (19-08-2010)
 =====
 * Switch from Thread.select to 

@@ -276,7 +276,15 @@ let queue ?log ?(priorities=fun _ -> true) s name =
 
 module Async =
 struct
-  type t = (bool ref*fd option ref)
+  (* m is used to make sure that 
+   * calls to [wake_up] and [stop]
+   * are thread-safe. *)
+  type t = 
+   { 
+     stop       : bool ref;
+     mutable fd : fd option;
+     m          : Mutex.t
+   }
 
   exception Stopped
 
@@ -291,7 +299,10 @@ struct
       if !stop then begin
         begin 
           try
-            Unix.close in_pipe 
+            (* This interface is purely asynchronous
+             * so we close both sides of the pipe here. *)
+            Unix.close in_pipe ;
+            Unix.close out_pipe 
           with _ -> ()
         end ;
         [] 
@@ -317,18 +328,36 @@ struct
      }
    in
    add scheduler task ;
-   (stop,ref (Some in_pipe))
+   { stop = stop ; fd = Some in_pipe ; 
+     m = Mutex.create () }
 
-  let wake_up (_,t) =
-    match !t with
-      | Some t -> ignore (Unix.write t " " 0 1)
-      | None -> raise Stopped
+  let wake_up t =
+    Mutex.lock t.m ;
+    try
+     begin
+      match t.fd with
+         | Some t -> ignore (Unix.write t " " 0 1)
+         | None -> raise Stopped
+     end ;
+     Mutex.unlock t.m
+    with
+      | e -> Mutex.unlock t.m; raise e
+    
 
-  let stop (b,t) = 
-    if !t = None then raise Stopped;
-    b := true ;
-    wake_up (b,t) ;
-    t := None
+  let stop t = 
+    Mutex.lock t.m;
+    try 
+      begin
+       match t.fd with
+         | Some c ->
+              t.stop := true ; 
+              ignore (Unix.write c " " 0 1)
+         | None   -> raise Stopped
+      end ;
+      t.fd <- None ;
+      Mutex.unlock t.m
+    with
+      | e -> Mutex.unlock t.m; raise e
 end
 
 module Io = 
