@@ -112,18 +112,22 @@ fi
 
 AC_MSG_CHECKING(for camlp4)
    if ! $OCAMLFIND query camlp4 > /dev/null 2>&1 ; then
-       AC_MSG_ERROR(Not found.)
+       AC_MSG_RESULT(Not found.)
    else
-   PA_DUPPY="pa_duppy.cmo"
-   PA_DOC="pa_duppy.mli"
-   PA_DUPPY_META="package \"syntax\" (
+   if ! `which camlp4o > /dev/null 2>&1`; then
+      AC_MSG_RESULT(Not found.)
+   else
+     PA_DUPPY="pa_duppy.cmo"
+     PA_DOC="pa_duppy.mli"
+     PA_DUPPY_META="package \"syntax\" (
   description = \"Syntactic sugars for Duppy\"
   requires = \"camlp4\"
   version=\"${VERSION}\"
   archive(syntax,preprocessor) = \"pa_duppy.cmo\"
   archive(syntax,toploop) = \"pa_duppy.cmo\"
 )"
-   AC_MSG_RESULT(ok)
+     AC_MSG_RESULT(ok)
+  fi
 fi
 
 AC_SUBST(PA_DUPPY)
