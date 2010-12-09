@@ -23,10 +23,11 @@ DVIPS = @DVIPS@
 PS2PDF = @PS2PDF@
 OCAMLLIBPATH = @CAMLLIBPATH@
 
-SOURCES = duppy.ml duppy.mli
+SOURCES = duppy_stubs.c duppy.ml duppy.mli
 RESULT = duppy
 OCAMLDOCFLAGS = -stars
-LIBINSTALL_FILES = $(wildcard *.mli *.cmi *.cma *.cmxa *.cmx *.a *.so)
+DOC_FILES = $(filter %.mli, $(SOURCES)) @PA_DOC@
+LIBINSTALL_FILES = $(wildcard *pa_duppy.cm* *.mli *.cmi *.cma *.cmxa *.cmx *.a *.so)
 ACLIBS = @LIBS@
 LDFLAGS = @LDFLAGS@
 CLIBS = $(ACLIBS:-l%=%)
@@ -36,9 +37,15 @@ CPPFLAGS = @CPPFLAGS@
 INCDIRS = @INC@
 NO_CUSTOM = yes
 OCAMLFLAGS = @OCAMLFLAGS@
+TRASH = pa_duppy.cmo pa_duppy.cmi
 
+all: @PA_DUPPY@ $(BEST)
 
-all: $(BEST)
+pa_duppy.cmo: pa_duppy.ml pa_duppy.cmi
+	$(OCAMLFIND) ocamlc -c -package camlp4 -package camlp4.quotations.o -package camlp4.extend -syntax camlp4o pa_duppy.ml
+
+pa_duppy.cmi: pa_duppy.mli
+	$(OCAMLFIND) ocamlc -c -package camlp4 -package camlp4.quotations.o -package camlp4.extend -syntax camlp4o pa_duppy.mli
 
 byte: byte-code-library
 

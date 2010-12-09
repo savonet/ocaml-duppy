@@ -4,6 +4,8 @@ INCDIRS = ../src @ALL_INC@
 OCAMLC = @OCAMLC@ -thread
 OCAMLOPT = @OCAMLOPT@ -thread
 LIBS = @all_requires@ duppy
+PP = camlp4o -I ../src pa_duppy.cmo
+export PP
 
 all: nc
 

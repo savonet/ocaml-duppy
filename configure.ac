@@ -1,6 +1,6 @@
 
 # check for one particular file of the sources 
-AC_INIT(ocaml-duppy, 0.3.3, savonet-users@lists.sourceforge.net)
+AC_INIT(ocaml-duppy, 0.4.0, savonet-users@lists.sourceforge.net)
 
 VERSION=$PACKAGE_VERSION
 AC_SUBST(VERSION)
@@ -107,9 +107,28 @@ AC_MSG_CHECKING(for ocaml-pcre)
        AC_MSG_ERROR(Not found.)
    else
    INC="$INC `$OCAMLFIND query pcre`"
-   requires="$requires pcre"
    AC_MSG_RESULT(ok)
 fi
+
+AC_MSG_CHECKING(for camlp4)
+   if ! $OCAMLFIND query camlp4 > /dev/null 2>&1 ; then
+       AC_MSG_ERROR(Not found.)
+   else
+   PA_DUPPY="pa_duppy.cmo"
+   PA_DOC="pa_duppy.mli"
+   PA_DUPPY_META="package \"syntax\" (
+  description = \"Syntactic sugars for Duppy\"
+  requires = \"camlp4\"
+  version=\"${VERSION}\"
+  archive(syntax,preprocessor) = \"pa_duppy.cmo\"
+  archive(syntax,toploop) = \"pa_duppy.cmo\"
+)"
+   AC_MSG_RESULT(ok)
+fi
+
+AC_SUBST(PA_DUPPY)
+AC_SUBST(PA_DUPPY_META)
+AC_SUBST(PA_DOC)
 
 if test "$OCAMLOPT" = no ; then
     BEST=byte
@@ -118,6 +137,7 @@ else
 fi
 
 # substitutions to perform
+requires="unix threads pcre bigarray"
 AC_SUBST(VERSION)
 AC_SUBST(OCAMLC)
 AC_SUBST(OCAMLOPT)
@@ -137,7 +157,6 @@ ALL_INC="`ocamlfind query -r -separator " " $requires` $_INC"
 INC="$INC $_INC"
 AC_SUBST(INC)
 AC_SUBST(ALL_INC)
-requires="unix threads $requires"
 all_requires="`ocamlfind query -r -separator " " -format "%p" $requires` $_requires"
 requires="$requires $_requires"
 AC_SUBST(requires)

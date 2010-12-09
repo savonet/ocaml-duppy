@@ -1,7 +1,7 @@
 (*****************************************************************************
 
   Duppy, a task scheduler for OCaml.
-  Copyright 2003-2008 Savonet team
+  Copyright 2003-2010 Savonet team
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -44,6 +44,9 @@
     *
     * {!Duppy.Io} implements recursive easy reading and writing to a [Unix.file_descr]
     *
+    * Finally, {!Duppy.Monad} and {!Duppy.Monad.Io} provide a monadic interface to
+    * program server code that with an implicit return/reply execution flow.
+    *
     * The scheduler can use several queues running concurently, each queue 
     * processing ready tasks. Of course, a queue should run in its own thread.*)
 
@@ -72,15 +75,14 @@ val queue :
 (** Stop all queues running on that scheduler, causing them to return. *)
 val stop : 'a scheduler -> unit
 
+(** Core task registration.
+  *
+  * A task will be a set of events to watch, and a corresponding function to
+  * execute when one of the events is trigered.
+  * 
+  * The executed function may then return a list of new tasks to schedule. *)
 module Task : 
 sig
-  (** This modules implements the core task registration.
-    *
-    * A task will be a set of events to watch, and a corresponding function to
-    * execute when one of the events is trigered.
-    *
-    * The executed function may then return a list of new tasks to schedule. *)
-
 
   (** A task is a list of events awaited,
     * and a function to process events that have occured.
@@ -106,13 +108,12 @@ sig
       'a scheduler -> ('a,[< event ]) task -> unit
 end
 
+(** Asynchronous task module
+  *
+  * This module implements an asychronous API to {!Duppy.scheduler}
+  * It allows to create a task that will run and then go to sleep. *)
 module Async :
 sig
-
-  (** Asynchronous task module for {!Duppy}
-    *
-    * This module implements an asychronous API to {!Duppy.scheduler}
-    * It allows to create a task that will run and then go to sleep. *)
 
   type t
 
@@ -141,17 +142,16 @@ sig
   val stop : t -> unit
 end
 
+(** Easy parsing of [Unix.file_descr].
+  *
+  * With {!Duppy.Io.read}, you can pass a file descriptor to the scheduler,
+  * along with a marker, and have it run the associated function when the
+  * marker is found.
+  *
+  * With {!Duppy.Io.write}, the schdeduler will try to write recursively to the file descriptor
+  * the given string. *)
 module Io :
 sig
-
-  (** This module implements an easy parsing of [Unix.file_descr].
-    *
-    * With {!Duppy.Io.read}, you can pass a file descriptor to the scheduler, 
-    * along with a marker, and have it run the associated function when the 
-    * marker is found.
-    *
-    * With {!Duppy.Io.write}, the schdeduler will try to write recursively to the file descriptor
-    * the given string.*)
 
   (** Type for markers.
     *
@@ -159,12 +159,15 @@ sig
     * [Pcre] module. *)
   type marker = Length of int | Split of string
 
+  (** Type of [Bigarray] used here. *)
+  type bigarray = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+
   (** Different types of failure.
     * 
-    * [Int d] is raised when reading or writing failed.
-    * the returned value is respectively the ammount of 
-    * data read or written *)
-  type failure = Int of int | Unix of Unix.error*string*string | Unknown of exn
+    * [Io_error] is raised when reading or writing
+    * returned 0. This usually means that the socket
+    * was closed. *)
+  type failure = Io_error | Unix of Unix.error*string*string | Unknown of exn
 
   (** Wrapper to perform a read on a socket and trigger a function when
     * a marker has been detected, or enough data has been read.
@@ -174,8 +177,8 @@ sig
     * Can be used recursively or not, depending on the way you process strings. 
     * Because of Unix's semantic, it is not possible to stop reading
     * at first marker, so there can be a remaining string. If not used
-    * recursively, this string will be the last string passed in the list.
-    * You should then initiate the next read with this value.
+    * recursively, the second optional argument may contain a remaining
+    * string. You should then initiate the next read with this value.
     *
     * The [on_error] function is used when reading failed on the socket.
     * Depending on your usage, it can be a hard failure, or simply a lost client.
@@ -185,16 +188,161 @@ sig
   val read :
         ?recursive:bool -> ?init:string -> ?on_error:(failure -> unit) ->
         priority:'a -> 'a scheduler -> Unix.file_descr -> 
-        marker -> (string list -> unit) -> unit
+        marker -> (string*(string option) -> unit) -> unit
 
   (** Similar to [read] but less complex.
-    * Simply write a string to the socket, and then launch some callback.
-    * @param exec function to execute after writing, default: [fun () -> ()] *)
+    * [write ?exec ?on_error ?string ?bigarray ~priority scheduler socket] 
+    * write data from [string], or from [bigarray] is no string is given, 
+    * to [socket], and executes [exec] or [on_error] if errors occured.
+    * @param exec function to execute after writing, default: [fun () -> ()] 
+    * @param on_error function to execute when an error occured, default: [fun _ -> ()] 
+    * @param string write data from this string 
+    * @param bigarray write data from this bigarray, if no [string] is given *)
   val write :
-        ?exec:(unit -> unit) -> ?on_error:(failure -> unit) -> priority:'a -> 
-        'a scheduler -> Unix.file_descr -> string -> unit
+        ?exec:(unit -> unit) -> ?on_error:(failure -> unit) -> 
+        ?bigarray:bigarray -> ?string:string -> priority:'a -> 
+        'a scheduler -> Unix.file_descr -> unit
 end
 
+(** Monadic interface to {!Duppy.Io}. 
+  * 
+  * This module can be used to write code
+  * that runs in various Duppy's tasks and
+  * raise values in a completely transparent way.
+  * 
+  * You can see examples of its use
+  * in the [examples/] directory of the
+  * source code and in the files 
+  * [src/tools/{harbor.camlp4,server.camlp4}]
+  * in liquidsoap's code. 
+  * 
+  * When a server communicates
+  * with a client, it performs several
+  * computations and, eventually, terminates.
+  * A computation can either return a new 
+  * value or terminate. For instance:
+  * 
+  * - Client connects.
+  * - Server tries to authenticate the client.
+  * - If authentication is ok, proceed with the next step.
+  * - Otherwise terminate.
+  *
+  * The purpose of the monad is to embed
+  * computations which can either return 
+  * a new value or raise a value that is used
+  * to terminate. *)
+module Monad : 
+sig
+
+  (** Type representing a computation
+    * which returns a value of type ['a] 
+    * or raises a value of type ['b] *) 
+  type ('a,'b) t
+
+  (** A reply function takes a value of type ['a]
+    * raised during the execution. The reply
+    * function is executed when the computation
+    * terminates. *)
+  type 'a reply = 'a -> unit
+
+  (** [return x] create a computation that 
+    * returns value [x]. *)
+  val return : 'a -> ('a,'b) t
+
+  (** [raise x] create a computation that raises
+    * value [x]. *)
+  val raise  : 'b -> ('a,'b) t
+
+  (** Compose two computations. 
+    * [bind f g] is equivalent to:
+    * [let x = f in g x] where [x] 
+   * has f's return type. *)
+  val bind : ('a,'b) t -> ('a -> ('c,'b) t) -> ('c,'b) t
+
+  (** [>>=] is an alternative notation
+    * for [bind] *)
+  val (>>=) : ('a,'b) t -> ('a -> ('c,'b) t) -> ('c,'b) t
+
+  (** [run f rep] executes [f] and process 
+    * the last value [x], returned or raised, 
+    * with [rep]. *)
+  val run  : ('a,'a) t -> 'a reply -> unit
+
+  (** [catch f g] redirects values [x] raised during
+    * [f]'s execution to [g]. The name suggests the
+    * usual [try .. with ..] exception catching. *)
+  val catch : ('a,'b) t -> ('b -> ('a,'c) t) -> ('a,'c) t
+
+  (** [fold_left f a [b1; b2; ..]] returns computation 
+    * [ (f a b1) >>= (fun a -> f a b2) >>= ...] *) 
+  val fold_left : ('a -> 'b -> ('a,'c) t) -> 'a -> 'b list -> ('a,'c) t
+
+  (** [iter f [x1; x2; ..]] returns computation
+    * [f x1 >>= (fun () -> f x2) >>= ...] *)
+  val iter : ('a -> (unit,'b) t) -> 'a list -> (unit,'b) t
+
+  (** This module implements monadic computations
+    * using [Duppy.Io]. It can be used to create
+    * computations that read or write from a socket,
+    * and also to redirect a computation in a different
+    * queue with a new priority. *)
+  module Io : 
+  sig
+    (** A handler for this module
+      * is a record that contains the
+      * required elements. In particular,
+      * [on_error] is a function that transforms
+      * an error raised by [Duppy.Io] to a reply
+      * used to terminate the computation.
+      * [init] is used internaly. It should 
+      * be initialized with [""] and should
+      * not be used in user's code. It contains the
+      * remaining data that was received when 
+      * using [read] *) 
+    type ('a,'b) handler =
+      { scheduler              : 'a scheduler ;
+        socket                 : Unix.file_descr ;
+        mutable init           : string ;
+        on_error               : Io.failure -> 'b }
+
+    (** [exec ?delay ~priority h f x] redirects computation
+      * [f] into a new queue with priority [priority] and
+      * delay [delay] ([0.] by default).
+      * It can be used to redirect a computation that
+      * has to run under a different priority. For instance,
+      * a computation that reads from a socket is generally
+      * not blocking because the function is executed
+      * only when some data is available for reading. 
+      * However, if the data that is read needs to be processed
+      * by a computation that can be blocking, then one may 
+      * use [exec] to redirect this computation into an 
+      * appropriate queue. *)
+    val exec : ?delay:float -> priority:'a -> ('a,'b) handler ->
+               ('c -> ('d,'b) t) -> 'c -> ('d,'b) t
+
+    (** [read ~priority ~marker h] creates a 
+      * computation that reads from [h.socket]
+      * and returns the first string split 
+      * according to [marker]. This function
+      * can be used to create a computation that
+      * reads data from a socket. *)
+    val read : priority:'a -> marker:Io.marker -> 
+               ('a,'b) handler -> (string,'b) t
+
+    (** [write ~priority h s] creates a computation
+      * that writes string [s] to [h.socket]. This
+      * function can be used to create a computation
+      * that sends data to a socket. *)
+    val write : priority:'a -> ('a,'b) handler -> 
+                string -> (unit,'b) t
+
+    (** [write_bigarray ~priority h ba] creates a computation
+      * that writes data from [ba] to [h.socket]. This function
+      * can to create a computation that writes data to a socket. *)
+    val write_bigarray : priority:'a -> ('a,'b) handler ->
+                         Io.bigarray -> (unit,'b) t
+  end
+end
 
   (** {2 Some culture..}
     * {e Duppy is a Caribbean patois word of West African origin meaning ghost or spirit.

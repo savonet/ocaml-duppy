@@ -1,7 +1,7 @@
 (*****************************************************************************
 
   Duppy, a task scheduler for OCaml.
-  Copyright 2003-2008 Savonet team
+  Copyright 2003-2010 Savonet team
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -363,115 +363,138 @@ end
 module Io = 
 struct
   type marker = Length of int | Split of string
-  type failure = Int of int | Unix of Unix.error*string*string | Unknown of exn
+  type failure = Io_error | Unix of Unix.error*string*string | Unknown of exn
+
+  exception Io
+
+  type bigarray = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+
+  external ba_write : Unix.file_descr -> bigarray -> int -> int -> int = "ocaml_duppy_write_ba"
 
   let read ?(recursive=false) ?(init="") ?(on_error=fun _ -> ())
            ~priority (scheduler:'a scheduler) socket marker exec = 
-    let rec f acc l =
-      assert (List.exists ((=) (`Read socket)) l) ;
-      let length =
+    let length = 1024 in
+    let b = Buffer.create length in
+    let buf = String.make length ' ' in
+    Buffer.add_string b init ;
+    let rec f l =
+      if (List.mem (`Read socket) l) then
+       begin
+        let input = Unix.read socket buf 0 length in
+        if input<=0 then raise Io ;
+        Buffer.add_substring b buf 0 input
+       end ;
+      let ret = 
         match marker with
-          | Length n -> n - (String.length acc)
-          | _ -> 100
-      in
-      let buf = String.make length ' ' in
-      let input = Unix.read socket buf 0 length in
-      if input<=0 then (on_error (Int input) ; [])
-      else
-        let acc = acc ^ (String.sub buf 0 input) in
-        let l,acc = 
-          match marker with
-            | Split r ->
-                  let rex = Pcre.regexp r in
-                  let ret = Pcre.full_split ~rex acc in
-                  (* A matched split list must contain at least 
-                   * a text and a separator *)
-                  if List.length ret < 2 then
-                    [],acc
-                  else
-                    begin
-                      (* Extract last matched field if 
-                       * not followed by a delimiter *)
-                      let ret,s = 
-                        match List.rev ret with
-                          | Pcre.Text s :: l -> List.rev l,s
-                          | _ -> ret,""
-                      in
-                      let process l e = 
-                        match e with
-                          | Pcre.Text s -> s :: l
-                          | _ -> l
-                      in
-                      let l = 
-                        List.fold_left process [] ret 
-                      in
-                      if not recursive then
-                        List.rev (s :: l),""
-                      else
-                        List.rev l,s
-                    end
-            | Length n when n <= String.length acc -> 
-               let len = String.length acc in
-               let rec f ret l =
-                 if ret >= n then (l,ret)
-                 else f (ret-n) ((String.sub acc (len - ret) n) :: l)
-               in
-               let l,ret = f len [] in
-               let s = String.sub acc (len - ret) ret in
-               if not recursive then
-                   List.rev (s::l),""
-               else
-                 List.rev l,s
-            | _ -> [],acc
-        in
-        (* Catch all exceptions.. *)
-        let f x y =
-         try
-          f x y
-         with
-           | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
-           | e -> on_error (Unknown e); []
-        in
-          if l <> [] then
-            begin
-              exec l ;
+          | Split r ->
+                let rex = Pcre.regexp r in
+                let acc = Buffer.contents b in
+                let ret = Pcre.full_split ~max:2 ~rex acc  in
+                let rec p l = 
+                 match l with
+                   | Pcre.Text x :: Pcre.Delim _ :: l -> 
+                       let f b x =
+                         match x with
+                           | Pcre.Text s 
+                           | Pcre.Delim s -> Buffer.add_string b s 
+                           | _      -> ()
+                       in
+                       if recursive then
+                        begin
+                         Buffer.reset b;
+                         List.iter (f b) l ;
+                         Some (x,None)
+                        end
+                       else
+                        begin
+                         let b = Buffer.create 10 in
+                         List.iter (f b) l ;
+                         Some (x, Some (Buffer.contents b))
+                        end
+                   | _ :: l' -> p l'
+                   | [] -> None
+                in
+                p ret
+          | Length n when n <= Buffer.length b -> 
+              let s = Buffer.sub b 0 n in
+              let rem = Buffer.sub b n (Buffer.length b - n) in
               if recursive then
-                [{ priority = priority ; events = [`Read socket] ;
-                   handler = f acc }]
+               begin
+                Buffer.reset b ;
+                Buffer.add_string b rem ;
+                Some (s, None)
+               end
               else
-                []
+                Some (s, Some rem)
+          | _ -> None
+      in
+      (* Catch all exceptions.. *)
+      let f x =
+       try
+        f x
+       with
+         | Io -> on_error Io_error; []
+         | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
+         | e -> on_error (Unknown e); []
+      in
+      match ret with
+        | Some x ->
+            begin
+              match x with
+                | s,Some s' when recursive ->
+                     exec (s,None) ;
+                     [{ priority = priority ; 
+                        events = [`Read socket] ;
+                        handler = f }]
+                | _ -> exec x; []
             end
-          else
-            [{ priority = priority ; events = [`Read socket] ;
-               handler = f acc }]
+        | None ->
+             [{ priority = priority ; 
+                events = [`Read socket] ;
+                handler = f }]
     in
     (* Catch all exceptions.. *)
-    let f x y = 
+    let f x = 
       try
-        f x y 
+        f x 
       with
+        | Io -> on_error Io_error; []
         | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
         | e -> on_error (Unknown e); []
     in
+      (* First one is without read,
+       * in case init contains the wanted match. *)
       let task = 
        {
          priority = priority ;
-         events = [`Read socket] ;
-         handler  = (f init)
+         events = [`Delay 0.; `Read socket] ;
+         handler  = f
        }
        in
       add scheduler task
 
-  let write ?(exec=fun () -> ()) ?(on_error=fun _ -> ()) ~priority
-            (scheduler:'a scheduler) socket s = 
-    let rec f acc l = 
+  let write ?(exec=fun () -> ()) ?(on_error=fun _ -> ()) 
+            ?bigarray ?string ~priority
+            (scheduler:'a scheduler) socket = 
+    let length,write = 
+      match string,bigarray with
+        | Some s,_ -> 
+            String.length s,
+            Unix.write socket s
+        | None,Some b ->
+            Bigarray.Array1.dim b,
+            ba_write socket b
+        | _ ->
+            0,fun _ _ -> 0
+    in
+    let rec f pos l = 
       assert (List.exists ((=) (`Write socket)) l) ;
-      let length = String.length acc in
-      let n = Unix.write socket s 0 length in
-      if n<=0 then (on_error (Int n) ; [])
+      let len = length - pos in
+      let n = write pos len in
+      if n<=0 then (on_error Io_error ; [])
       else
       begin
-        if n < length then
+        if n < len then
           begin
             (* Catch all exceptions.. *)
             let f x y =
@@ -481,9 +504,8 @@ struct
                | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
                | e -> on_error (Unknown e); []
             in
-            let s = String.sub s n (n-length) in
-              [{ priority = priority ; events = [`Write socket] ;
-                 handler = f s }]
+            [{ priority = priority ; events = [`Write socket] ;
+               handler = f (pos+n) }]
           end
         else
           (exec () ; [])
@@ -497,15 +519,122 @@ struct
         | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
         | e -> on_error (Unknown e); []
     in
-    if s <> "" then
+    if length > 0 then
         let task = 
           {
             priority = priority ;
             events = [`Write socket] ;
-            handler  = (f s)
+            handler  = (f 0)
           }
         in
         add scheduler task
     else 
         exec ()
 end
+
+(** A monad for implicit
+  * continuations or responses *)
+module Monad = 
+struct
+  type 'b reply = 'b -> unit
+  type ('a,'b) continuation = 'a -> 'b reply -> unit
+  type ('a,'b) t  = ('a,'b) continuation -> 'b reply -> unit
+
+  let return x = fun cont rep -> cont x rep
+  let bind f g =
+    fun cont rep ->
+      let cont' x rep = g x cont rep in
+        f cont' rep
+
+  let (>>=) = bind
+
+  let raise x = fun cont rep -> rep x
+
+  let run f rep = f (fun x rep -> rep x) rep
+
+  let catch f g = 
+    fun cont rep ->
+      let cont' x _ = cont x rep in
+      let rep' x = g x cont rep in
+      f cont' rep'
+
+  let rec fold_left f a =
+    function
+       | [] -> a
+       | b :: l ->
+          fold_left f (bind a (fun a -> f a b)) l
+
+  let fold_left f a l = fold_left f (return a) l
+
+  let iter f l = fold_left (fun () b -> f b) () l
+
+  module Io =
+  struct
+    type ('a,'b) handler = 
+      { scheduler              : 'a scheduler ;
+        socket                 : Unix.file_descr ;
+        mutable init           : string ;
+        on_error               : Io.failure -> 'b }
+
+    let rec exec ?(delay=0.) ~priority h f x = 
+      (fun cont rep -> 
+        let handler _ =
+          begin
+           try
+             (f x) cont rep 
+           with
+             | e -> rep (h.on_error (Io.Unknown e))
+          end ;
+          []
+        in
+        Task.add h.scheduler 
+          { Task.
+             priority = priority ;
+             events   = [`Delay delay];
+             handler  = handler })
+
+    let read ~priority ~marker h = 
+      (fun cont rep -> 
+         let process x =
+           let s = 
+             match x with
+               | s, None -> s
+               | s, Some s' -> 
+                   h.init <- s' ;
+                   s
+           in 
+           cont s rep 
+         in
+         let init = h.init in
+         h.init <- "" ;
+         let on_error x = 
+            rep (h.on_error x)
+         in
+         Io.read ~priority ~init ~recursive:false 
+                 ~on_error h.scheduler h.socket 
+                 marker process)
+
+    let write ~priority h s =
+      (fun cont rep ->
+         let on_error x =
+           rep (h.on_error x)
+         in
+         let exec () = 
+           cont () rep
+         in
+         Io.write ~priority ~on_error ~exec 
+                  ~string:s h.scheduler h.socket)
+
+    let write_bigarray ~priority h ba =
+      (fun cont rep ->
+         let on_error x =
+           rep (h.on_error x)
+         in
+         let exec () =
+           cont () rep
+         in
+         Io.write ~priority ~on_error ~exec
+                  ~bigarray:ba h.scheduler h.socket)
+  end
+end
+
