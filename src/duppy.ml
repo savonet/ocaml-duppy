@@ -536,27 +536,42 @@ end
   * continuations or responses *)
 module Monad = 
 struct
-  type 'b reply = 'b -> unit
-  type ('a,'b) continuation = 'a -> 'b reply -> unit
-  type ('a,'b) t  = ('a,'b) continuation -> 'b reply -> unit
+  type ('a,'b) handler = 
+    { return: 'a -> unit ;
+      raise:  'b -> unit }
+  type ('a,'b) t  = ('a,'b) handler -> unit
 
-  let return x = fun cont rep -> cont x rep
+  let return x = 
+    fun h -> h.return x 
+
+  let raise x = 
+    fun h -> h.raise x
+
   let bind f g =
-    fun cont rep ->
-      let cont' x rep = g x cont rep in
-        f cont' rep
+    fun h ->
+      let ret x = 
+        let process = g x in
+        process h
+      in
+      f { return = ret ;
+          raise  = h.raise }
 
   let (>>=) = bind
 
-  let raise x = fun cont rep -> rep x
-
-  let run f rep = f (fun x rep -> rep x) rep
+  let run f ~return:ret ~raise:raise () = 
+    f { return = ret ;
+        raise  = raise }
 
   let catch f g = 
-    fun cont rep ->
-      let cont' x _ = cont x rep in
-      let rep' x = g x cont rep in
-      f cont' rep'
+    fun h ->
+      let raise x = 
+        let process = g x in
+        process h
+     in
+     f { return = h.return ;
+         raise  = raise }
+
+  let (=<<) = fun x y -> catch y x
 
   let rec fold_left f a =
     function
@@ -577,13 +592,13 @@ struct
         on_error               : Io.failure -> 'b }
 
     let rec exec ?(delay=0.) ~priority h f x = 
-      (fun cont rep -> 
+      (fun h' -> 
         let handler _ =
           begin
            try
-             (f x) cont rep 
+             (f x) h'
            with
-             | e -> rep (h.on_error (Io.Unknown e))
+             | e -> h'.raise (h.on_error (Io.Unknown e))
           end ;
           []
         in
@@ -594,7 +609,7 @@ struct
              handler  = handler })
 
     let read ~priority ~marker h = 
-      (fun cont rep -> 
+      (fun h' -> 
          let process x =
            let s = 
              match x with
@@ -603,35 +618,35 @@ struct
                    h.init <- s' ;
                    s
            in 
-           cont s rep 
+           h'.return s
          in
          let init = h.init in
          h.init <- "" ;
          let on_error x = 
-            rep (h.on_error x)
+            h'.raise (h.on_error x)
          in
          Io.read ~priority ~init ~recursive:false 
                  ~on_error h.scheduler h.socket 
                  marker process)
 
     let write ~priority h s =
-      (fun cont rep ->
+      (fun h' ->
          let on_error x =
-           rep (h.on_error x)
+           h'.raise (h.on_error x)
          in
          let exec () = 
-           cont () rep
+           h'.return ()
          in
          Io.write ~priority ~on_error ~exec 
                   ~string:s h.scheduler h.socket)
 
     let write_bigarray ~priority h ba =
-      (fun cont rep ->
+      (fun h' ->
          let on_error x =
-           rep (h.on_error x)
+           h'.raise (h.on_error x)
          in
          let exec () =
-           cont () rep
+           h'.return ()
          in
          Io.write ~priority ~on_error ~exec
                   ~bigarray:ba h.scheduler h.socket)

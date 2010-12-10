@@ -49,7 +49,7 @@ let () = Hashtbl.add commands "hello" (false,fun () -> duppy_return "world") ;
          Hashtbl.add commands "date" (true,exec_command "date") ;
          Hashtbl.add commands "whoami" (true,exec_command "whoami") ;
          Hashtbl.add commands "sleep" (true,exec_command "sleep 15") ;
-	 Hashtbl.add commands "exit" (true,fun () -> duppy_raise Exit) 
+	 Hashtbl.add commands "exit" (true,fun () -> duppy_raise ()) 
 (* Add commands here *)
 let help = Buffer.create 10
 let () = Buffer.add_string help "List of commands:" ;
@@ -60,17 +60,14 @@ let () = Buffer.add_string help "List of commands:" ;
 
 let handle_client socket = 
   let on_error e =
-    begin
-      match e with
-        | Duppy.Io.Io_error ->
-             Printf.printf "Client disconnected"
-        | Duppy.Io.Unix (c,p,m) ->
-             Printf.printf "%s" (Printexc.to_string 
-                                  (Unix.Unix_error (c,p,m)))
-        | Duppy.Io.Unknown e ->
-                 Printf.printf "%s" (Printexc.to_string e)
-    end ;
-    Exit
+     match e with
+       | Duppy.Io.Io_error ->
+            Printf.printf "Client disconnected"
+       | Duppy.Io.Unix (c,p,m) ->
+            Printf.printf "%s" (Printexc.to_string 
+                                 (Unix.Unix_error (c,p,m)))
+       | Duppy.Io.Unknown e ->
+                Printf.printf "%s" (Printexc.to_string e)
   in
   let h =
     { Duppy.Monad.Io.
@@ -117,27 +114,27 @@ let handle_client socket =
       exec ()
     done
   in
+  let close () = 
+    try
+      Unix.close socket
+     with
+       | _ -> ()
+  in
+  let return () =
+    let on_error e =
+      on_error e ;
+      close ()
+    in
+    Duppy.Io.write ~priority:io_priority
+                   ~on_error
+                   ~exec:close scheduler
+                   ~string:"Bye!\r\n" socket
+  in
   duppy_run
     exec ()
   with
-    | e ->
-       let close () =
-         try
-           Unix.close socket
-         with
-           | _ -> ()
-       in
-       if e = Exit then
-         let on_error e =
-           ignore(on_error e) ;
-           close ()
-         in
-         Duppy.Io.write ~priority:io_priority
-                        ~on_error
-                        ~exec:close scheduler
-                        ~string:"Bye!\r\n" socket
-       else
-         close ()
+    { return = return ;
+      raise  = close }
 
 open Unix
 

@@ -239,12 +239,6 @@ sig
     * or raises a value of type ['b] *) 
   type ('a,'b) t
 
-  (** A reply function takes a value of type ['a]
-    * raised during the execution. The reply
-    * function is executed when the computation
-    * terminates. *)
-  type 'a reply = 'a -> unit
-
   (** [return x] create a computation that 
     * returns value [x]. *)
   val return : 'a -> ('a,'b) t
@@ -263,15 +257,18 @@ sig
     * for [bind] *)
   val (>>=) : ('a,'b) t -> ('a -> ('c,'b) t) -> ('c,'b) t
 
-  (** [run f rep] executes [f] and process 
-    * the last value [x], returned or raised, 
-    * with [rep]. *)
-  val run  : ('a,'a) t -> 'a reply -> unit
+  (** [run f ~return ~raise ()] executes [f] and process 
+    * returned values with [return] or raised values 
+    * with [raise]. *)
+  val run  : ('a,'b) t -> return:('a -> unit) -> raise:('b -> unit) -> unit -> unit
 
   (** [catch f g] redirects values [x] raised during
     * [f]'s execution to [g]. The name suggests the
     * usual [try .. with ..] exception catching. *)
   val catch : ('a,'b) t -> ('b -> ('a,'c) t) -> ('a,'c) t
+
+  (** [=<<] is an alternative notation for catch. *)
+  val (=<<) : ('b -> ('a,'c) t) -> ('a,'b) t -> ('a,'c) t
 
   (** [fold_left f a [b1; b2; ..]] returns computation 
     * [ (f a b1) >>= (fun a -> f a b2) >>= ...] *) 

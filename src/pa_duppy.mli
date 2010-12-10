@@ -41,8 +41,8 @@
   * {- {[ duppy_run
   *     foo
   *   with
-  *     | a -> f
-  *     | b -> g ]}
+  *     { return = f ;
+  *       raise  = g } ]}
   *
   * is equivalent to:
   *

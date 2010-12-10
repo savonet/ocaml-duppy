@@ -137,6 +137,8 @@ let error_500 =
 let error_403 = 
   server_error (403,"Forbidden")
 
+type socket_status = Keep | Close
+
 let send_reply h reply =
   let write s = 
     duppy_write 
@@ -157,49 +159,45 @@ let send_reply h reply =
            (fun (x,y) -> 
              Printf.sprintf "%s: %s" x y) reply.reply_headers))
   in
-  duppy_try
-    duppy_do
-      write http_header ;
-      begin
-       match reply.reply_data with
-         | String s -> 
-             write s
-         | File fd -> 
-             let stats = Unix.fstat fd in
-             let ba = 
-               Bigarray.Array1.map_file
-                 fd Bigarray.char Bigarray.c_layout false
-                 (stats.Unix.st_size)
-             in
-             let close () = 
-               try
-                 Unix.close fd
-               with
-                 | _ -> ()
-             in
-             let on_error e = 
-                close () ;
-                h.Duppy.Monad.Io.on_error e
-             in
-             let h = 
-               { h with
-                  Duppy.Monad.Io.
-                   on_error = on_error }
-             in
-             duppy_do
-               duppy_write_bigarray 
-                 ba
-               with
-                 { priority = Non_blocking ;
-                   handler  = h } ;
-               duppy_return (close ())
-             done
-         | None ->  duppy_raise ()
-      end ;
-      write "\r\n\r\n"
+  duppy_do
+    write http_header ;
+    begin
+     match reply.reply_data with
+       | String s -> 
+           write s
+       | File fd -> 
+           let stats = Unix.fstat fd in
+           let ba = 
+             Bigarray.Array1.map_file
+               fd Bigarray.char Bigarray.c_layout false
+               (stats.Unix.st_size)
+           in
+           let close () = 
+             try
+               Unix.close fd
+             with
+               | _ -> ()
+           in
+           let on_error e = 
+              close () ;
+              h.Duppy.Monad.Io.on_error e
+           in
+           let h = 
+             { h with
+                Duppy.Monad.Io.
+                 on_error = on_error }
+           in
+           duppy_do
+             duppy_write_bigarray 
+               ba
+             with
+               { priority = Non_blocking ;
+                 handler  = h } ;
+             duppy_return (close ())
+           done
+       | None -> duppy_return ()
+    end 
     done
-  with
-    | _ -> duppy_return ()
 
 let file_request path _ request = 
   let uri = 
@@ -332,13 +330,13 @@ let parse_request h r =
 
 let handle_client socket =
   let on_error e =
-    match e with
-      | Duppy.Io.Io_error -> ()
-      | Duppy.Io.Unix (c,p,m) ->
-          Printf.printf "%s" (Printexc.to_string
-                               (Unix.Unix_error (c,p,m)))
-      | Duppy.Io.Unknown e ->
-          Printf.printf "%s" (Printexc.to_string e)
+     match e with
+       | Duppy.Io.Io_error -> ()
+       | Duppy.Io.Unix (c,p,m) ->
+           Printf.printf "%s" (Printexc.to_string
+                                (Unix.Unix_error (c,p,m)))
+       | Duppy.Io.Unknown e ->
+           Printf.printf "%s" (Printexc.to_string e)
   in
   let h =
     { Duppy.Monad.Io.
@@ -348,7 +346,7 @@ let handle_client socket =
        on_error  = on_error }
   in
   (* Read and process lines *)
-  let rec exec () =
+  let exec =
     duppy data =
        duppy_read
          Duppy.Io.Split "\r\n\r\n"
@@ -356,52 +354,64 @@ let handle_client socket =
          { priority = Non_blocking ;
            handler  = h }
     in
-    duppy (do_close,reply) =
-     let h =
-       { h with
-           Duppy.Monad.Io.
-            on_error =
-             (fun e ->
-               on_error e;
-               error_500) }
-     in 
-     duppy_try
-       duppy request =
-         parse_request h data
-       in
-       duppy reply = 
-         handle_request h request
-       in
-       let close_header =
-         try
-           (assoc_uppercase "CONNECTION" request.request_headers) = "close"
-         with
-           | Not_found -> false
-       in
-       let do_close = 
-         request.request_protocol = Http_10 ||
-         close_header
-       in
-       duppy_return (do_close,reply)
-     with
-       | reply -> duppy_return (true,reply)
+    duppy (keep,reply) = 
+      duppy_try
+        let h =
+           { h with
+               Duppy.Monad.Io.
+                on_error =
+                 (fun e ->
+                   on_error e;
+                   error_500) }
+        in
+        duppy request =
+          parse_request h data
+        in
+        duppy reply = 
+          handle_request h request
+        in
+        let close_header headers =
+          try
+            (assoc_uppercase "CONNECTION" headers) = "close"
+          with
+            | Not_found -> false
+        in
+        let keep = 
+          if
+            request.request_protocol = Http_10 ||
+            close_header request.request_headers ||
+            close_header reply.reply_headers
+          then
+            Close
+          else
+            Keep
+        in
+        duppy_return (keep,reply)
+      with
+        | reply -> duppy_return (Close,reply)
     in
     duppy_do
-      send_reply h reply ;
-      if do_close then
-        duppy_raise ()
-      else
-        exec ()
+        send_reply h reply ;
+        if keep = Keep then
+          duppy_return ()
+        else
+          duppy_raise ()
     done
   in
-  duppy_run 
-    exec () 
-  with
-    | _ ->
-      (try
-        Unix.close socket
-       with
-         | _ -> ())
+  let rec run () =
+    let raise () = 
+          try
+            Unix.close socket
+          with
+            | _ -> ()
+    in 
+    duppy_run 
+      exec
+    with
+      { return = run ;
+        raise = raise }
+  in
+  run ()
 
 let new_queue ~priority ~name () =
    let priorities p = p = priority in

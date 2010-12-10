@@ -104,8 +104,16 @@ EXTEND Gram
       [ [ "duppy_try"; e = expr LEVEL ";"; "with"; c = match_case ->
             <:expr< Duppy.Monad.catch $e$ (function $c$) >>
 
-        | "duppy_run"; e = expr LEVEL ";"; "with"; c = match_case ->
-            <:expr< Duppy.Monad.run $e$ (function $c$) >>
+        | "duppy_run"; e = expr LEVEL ";"; "with"; "{"; l = duppy_match; "}" ->
+            let return,raise = 
+              try
+                patt_assoc "return" l,
+                patt_assoc "raise"  l
+              with
+                | Not_found ->
+                    invalid_arg ("Invalid arguments for duppy_run")
+            in
+            <:expr< Duppy.Monad.run $e$ ~return:$return$ ~raise:$raise$ () >>
 
         | "duppy"; l = letb_binding; "in"; e = expr LEVEL ";" ->
             <:expr< let $gen_binding l$ in $gen_bind l e$ >>
