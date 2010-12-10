@@ -49,6 +49,6 @@ CAMLprim value ocaml_duppy_write_ba(value _fd, value ba, value _ofs, value _len)
     len -= ret;
   }
 
-  CAMLreturn(Val_long(len));
+  CAMLreturn(Val_long(written));
 }
 
