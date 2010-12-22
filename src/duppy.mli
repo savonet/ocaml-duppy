@@ -260,7 +260,7 @@ sig
   (** [run f ~return ~raise ()] executes [f] and process 
     * returned values with [return] or raised values 
     * with [raise]. *)
-  val run  : ('a,'b) t -> return:('a -> unit) -> raise:('b -> unit) -> unit -> unit
+  val run  : return:('a -> unit) -> raise:('b -> unit) -> ('a,'b) t -> unit
 
   (** [catch f g] redirects values [x] raised during
     * [f]'s execution to [g]. The name suggests the
@@ -278,6 +278,77 @@ sig
     * [f x1 >>= (fun () -> f x2) >>= ...] *)
   val iter : ('a -> (unit,'b) t) -> 'a list -> (unit,'b) t
 
+  (** This module implements monadic 
+    * mutex computations. They can be used
+    * to write blocking code that is compatible
+    * with duppy's tasks, i.e. [Mutex.lock m] blocks
+    * the calling computation and not the calling thread. *)
+  module Mutex : 
+  sig
+    (** Type for a mutex. *)
+    type mutex 
+
+    (** [create ~priority s] creates a mutex. Implementation-wise,
+      * a duppy task is created that will be used to select a 
+      * waiting computation, lock the mutex on it and resume it.
+      * Thus, [priority] and [s] represents, resp., the priority 
+      * and scheduler used when running calling process' computation. *)
+    val create : priority:'a -> 'a scheduler -> mutex
+
+    (** A computation that locks a mutex
+      * and returns [unit] afterwards. Computation
+      * will be blocked until the mutex is sucessfuly locked. *)
+    val lock : mutex -> (unit,'a) t
+
+    (** A computation that tries to lock a mutex.
+      * Returns immediatly [true] if the mutex was sucesfully locked
+      * or [false] otherwise. *)
+    val try_lock : mutex -> (bool,'a) t
+
+    (** A computation that unlocks a mutex. 
+      * Should return immediatly. *)
+    val unlock : mutex -> (unit,'a) t
+  end
+
+  (** This module implements monadic
+    * condition computations. They can be used
+    * to write waiting code that is compatible
+    * with duppy's tasks, i.e. [Condition.wait c m] blocks
+    * the calling computation and not the calling thread
+    * until [Condition.signal c] or [Condition.broadcast c] has 
+    * been called. *)
+  module Condition : 
+  sig
+    (** Type of a condition, used in [wait] and [broadcast] *)
+    type condition
+
+    (** Create a condition. Implementation-wise,
+      * a duppy task is created that will be used to select a
+      * waiting computation, and resume it.
+      * Thus, [priority] and [s] represents, resp., the priority
+      * and scheduler used when running calling process' computation. *)
+    val create : priority:'a -> 'a scheduler -> condition
+
+    (** [wait h m] is a computation that:
+      * {ul
+      * {- Unlock mutex [m]}
+      * {- Wait until [Condition.signal c] or [Condition.broadcast c] 
+           has been called}
+      * {- Locks mutex [m]}
+      * {- Returns [unit]}} *)
+    val wait : condition -> Mutex.mutex -> (unit,'b) t
+
+    (** [broadcast c] is a computation that 
+      * resumes all computations waiting on [c]. It should
+      * return immediatly. *)
+    val broadcast : condition -> (unit,'a) t
+
+    (** [signal c] is a computation that resumes one 
+      * computation waiting on [c]. It should return
+      * immediatly. *)
+    val signal : condition -> (unit,'a) t
+  end
+
   (** This module implements monadic computations
     * using [Duppy.Io]. It can be used to create
     * computations that read or write from a socket,
@@ -285,6 +356,9 @@ sig
     * queue with a new priority. *)
   module Io : 
   sig
+
+    (** {2 Type } *)
+
     (** A handler for this module
       * is a record that contains the
       * required elements. In particular,
@@ -302,7 +376,9 @@ sig
         mutable init           : string ;
         on_error               : Io.failure -> 'b }
 
-    (** [exec ?delay ~priority h f x] redirects computation
+    (** {2 Execution flow } *)
+
+    (** [exec ?delay ~priority h f] redirects computation
       * [f] into a new queue with priority [priority] and
       * delay [delay] ([0.] by default).
       * It can be used to redirect a computation that
@@ -315,7 +391,9 @@ sig
       * use [exec] to redirect this computation into an 
       * appropriate queue. *)
     val exec : ?delay:float -> priority:'a -> ('a,'b) handler ->
-               ('c -> ('d,'b) t) -> 'c -> ('d,'b) t
+               ('c,'b) t -> ('c,'b) t
+
+    (** {2 Read/write } *)
 
     (** [read ~priority ~marker h] creates a 
       * computation that reads from [h.socket]

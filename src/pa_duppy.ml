@@ -113,7 +113,7 @@ EXTEND Gram
                 | Not_found ->
                     invalid_arg ("Invalid arguments for duppy_run")
             in
-            <:expr< Duppy.Monad.run $e$ ~return:$return$ ~raise:$raise$ () >>
+            <:expr< Duppy.Monad.run ~return:$return$ ~raise:$raise$ $e$ >>
 
         | "duppy"; l = letb_binding; "in"; e = expr LEVEL ";" ->
             <:expr< let $gen_binding l$ in $gen_bind l e$ >>
@@ -123,6 +123,30 @@ EXTEND Gram
 
         | "duppy_iter" ->
              <:expr< Duppy.Monad.iter >>
+ 
+        | "duppy_wait" ->
+             <:expr< Duppy.Monad.Condition.wait >>
+
+        | "duppy_broadcast" ->
+            <:expr< Duppy.Monad.Condition.broadcast >>
+
+        | "duppy_signal" ->
+            <:expr< Duppy.Monad.Condition.signal >>
+
+        | "duppy_condition" ->
+           <:expr< Duppy.Monad.Condition.create >>
+
+        | "duppy_lock" ->
+             <:expr< Duppy.Monad.Mutex.lock >>
+
+        | "duppy_try_lock" ->
+             <:expr< Duppy.Monad.Mutex.lock >>
+
+        | "duppy_unlock" ->
+            <:expr< Duppy.Monad.Mutex.unlock >>
+
+        | "duppy_mutex" ->
+           <:expr< Duppy.Monad.Mutex.create >>
 
         | "duppy_fold_left" ->
              <:expr< Duppy.Monad.fold_left >>
@@ -142,7 +166,7 @@ EXTEND Gram
                  | Not_found ->
                     invalid_arg ("Invalid arguments for duppy_exec")
              in
-             <:expr< Duppy.Monad.Io.exec ~priority:$p$ $h$ (fun () -> $e$) () >>
+             <:expr< Duppy.Monad.Io.exec ~priority:$p$ $h$ $e$ >>
 
         | "duppy_write"; e = sequence; "with"; "{"; l = duppy_match; "}" ->
              let p,h =
