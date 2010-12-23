@@ -595,61 +595,86 @@ struct
   struct
     type mutex = 
       { write : Unix.file_descr ;
-        mutable locked : bool ;
-        mutable tasks : (unit->unit) list ;
+        locked : bool ref ;
+        stop  : bool ref ;
+        tasks : ((unit->unit) list) ref;
         mutex : Mutex.t }
 
     let tmp = String.create 1024
 
+    let finalize m = 
+      Gc.finalise_release ();
+      Mutex.lock m.mutex ;
+      m.stop := true ;
+      ignore(Unix.write m.write " " 0 1) ; 
+      Mutex.unlock m.mutex
+
     let create ~priority s = 
       let (x,y) = Unix.pipe () in
-      let m = 
-        { write = y ;
-          locked = false ;
-          tasks = [] ;
-          mutex = Mutex.create () }
-      in
+      let mutex = Mutex.create () in
+      let locked = ref false in
+      let stop = ref false in
+      let tasks = ref [] in
       let task f = 
         [{ Task.
            priority = priority ;
            events = [`Delay 0.];
            handler = (fun _ -> f (); [])}]
       in
-      let rec handler _ =
-         Mutex.lock m.mutex ;
+      let rec handler _ = 
+         Mutex.lock mutex ;
          (* I may be stepping on thin 
           * ice here but let's try
           * it.. *)
-         assert(not m.locked);
-         let tasks = 
-            (* I don't think shuffling tasks
-             * matters here.. *)
-            match m.tasks with
-              | x :: l ->
-                 m.tasks <- l ;
-                 m.locked <- true ;
-                 task x
-              | _ -> assert false
-         in
-         Mutex.unlock m.mutex ;
-         ignore(Unix.read x tmp 0 1024) ;
-         { Task.
-            priority = priority ;
-            events   = [`Read x];
-            handler  = handler } :: tasks
+         if not !stop then
+          begin
+           assert(not !locked);
+           let tasks = 
+              (* I don't think shuffling tasks
+               * matters here.. *)
+              match !tasks with
+                | x :: l ->
+                   tasks := l ;
+                   locked := true ;
+                   task x
+                | _ -> assert false
+           in
+           Mutex.unlock mutex ;
+           ignore(Unix.read x tmp 0 1024) ;
+           { Task.
+              priority = priority ;
+              events   = [`Read x];
+              handler  = handler } :: tasks
+          end
+         else
+          try
+            Unix.close x ;
+            Unix.close y ;
+            []
+          with
+            | _ -> []
       in
       Task.add s
        { Task.
           priority = priority;
           events   = [`Read x];
           handler  = handler } ;
+      let m =
+        { write = y ;
+          locked = locked ;
+          stop = stop ;
+          tasks = tasks ;
+          mutex = Mutex.create () }
+      in
+      Gc.finalise finalize m ;
       m
 
     let lock m =
-      (fun h' -> 
+      (fun h' ->
         Mutex.lock m.mutex ;
-        m.tasks <- h'.return :: m.tasks ;
-        let wake_up = not m.locked in
+        assert(not !(m.stop));
+        m.tasks := h'.return :: !(m.tasks) ;
+        let wake_up = not !(m.locked) in
         Mutex.unlock m.mutex ;
         if wake_up then
           ignore(Unix.write m.write " " 0 1))
@@ -657,9 +682,10 @@ struct
     let try_lock m = 
      (fun h' ->
         Mutex.lock m.mutex ;
-        if not m.locked then
+        assert(not !(m.stop));
+        if not !(m.locked) then
          begin
-          m.locked <- true ;
+          m.locked := true ;
           Mutex.unlock m.mutex ;
           h'.return true ;
          end
@@ -672,13 +698,14 @@ struct
     let unlock m =
       (fun h' -> 
         Mutex.lock m.mutex ;
+        assert(not !(m.stop));
         (* Here we allow inter-thread 
          * and double unlock.. Double unlock
          * is not necessarily a problem and
          * inter-thread unlock well.. what is
          * a thread here ?? :-) *)
-        m.locked <- false ;
-        let wake_up = m.tasks <> [] in
+        m.locked := false ;
+        let wake_up = !(m.tasks) <> [] in
         Mutex.unlock m.mutex ;
         if wake_up then
           ignore(Unix.write m.write " " 0 1) ;
@@ -696,76 +723,107 @@ struct
          * Mixed signal/broadcast concurrent
          * calls should be processed synchronously
          * which is why we have those.. *)
-        mutable busy : bool ;
+        busy : bool ref ;
         pre_condition : Condition.t ;
         post_condition : Condition.t ;
-        mutable broadcast : bool ;
-        mutable tasks : (Mutex.mutex*(unit->unit)) list }
+        broadcast : bool ref ;
+        stop : bool ref ;
+        tasks : ((Mutex.mutex*(unit->unit)) list) ref }
+
+    let finalize c = 
+       Gc.finalise_release ();
+       Mutex_o.lock c.mutex ;
+       c.stop := true ;
+       ignore(Unix.write c.write " " 0 1) ; 
+       Mutex_o.unlock c.mutex
 
     let create ~priority s = 
       let (x,y) = Unix.pipe () in
-      let c = 
-       { write = y; 
-         tasks = [];
-         broadcast = false ;
-         pre_condition = Condition.create () ;
-         post_condition = Condition.create () ;
-         busy = false ;
-         mutex = Mutex_o.create () }
-      in
+      let broadcast = ref false in
+      let busy = ref false in
+      let stop = ref false in
+      let pre_condition = Condition.create () in
+      let post_condition = Condition.create () in
+      let mutex = Mutex_o.create () in
+      let tasks = ref [] in
       let rec handler _ = 
-         Mutex_o.lock c.mutex ;
-         assert(c.busy);
-         let process (m,f) =
-           {Task.
-             priority = priority ;
-             events = [`Delay 0.];
-             handler = fun _ -> 
-               Mutex.lock m
-                 { raise = (fun () -> assert false);
-                   return = f }; []}
-         in
-         let tasks = 
-           if c.broadcast then
-             let ret = c.tasks in
-             c.tasks <- [] ;
-             List.map process ret
-           else
-             (* I don't think shuffling tasks
-              * matters here.. *)
-             match c.tasks with
-               | x :: l -> 
-                  c.tasks <- l ;
-                  [process x]
-               | [] -> []
-         in
-         c.broadcast <- false ;
-         (* Here we exactly consume one char
-          * because there should be exactly
-          * one read per write. *)
-         ignore(Unix.read x " " 0 1);
-         c.busy <- false ;
-         Condition.signal c.post_condition ;
-         Mutex_o.unlock c.mutex ;
-         { Task.
-            priority = priority ;
-            events   = [`Read x];
-            handler  = handler } :: tasks
+         Mutex_o.lock mutex ;
+         if not !stop then
+          begin
+           assert(!busy);
+           let process (m,f) =
+             {Task.
+               priority = priority ;
+               events = [`Delay 0.];
+               handler = fun _ -> 
+                 Mutex.lock m
+                   { raise = (fun () -> assert false);
+                     return = f }; []}
+           in
+           let tasks = 
+             if !broadcast then
+               let ret = !tasks in
+               tasks := [] ;
+               List.map process ret
+             else
+               (* I don't think shuffling tasks
+                * matters here.. *)
+               match !tasks with
+                 | x :: l -> 
+                    tasks := l ;
+                    [process x]
+                 | [] -> []
+           in
+           broadcast := false ;
+           (* Here we exactly consume one char
+            * because there should be exactly
+            * one read per write. *)
+           ignore(Unix.read x " " 0 1);
+           busy := false ;
+           Condition.signal post_condition ;
+           Mutex_o.unlock mutex ;
+           { Task.
+              priority = priority ;
+              events   = [`Read x];
+              handler  = handler } :: tasks
+          end
+         else
+           try
+             busy := false ;
+             Condition.signal post_condition ;
+             Unix.close x ;
+             Unix.close y ;
+             Mutex_o.unlock mutex ;
+             []
+           with
+             | _ -> Mutex_o.unlock mutex; []
       in
       Task.add s
        { Task.
           priority = priority;
           events   = [`Read x];
           handler  = handler } ;
+      let c =
+       { write = y;
+         tasks = tasks;
+         broadcast = broadcast ;
+         pre_condition = pre_condition ;
+         post_condition = post_condition ;
+         busy = busy ;
+         stop = stop ;
+         mutex = mutex }
+      in
+      Gc.finalise finalize c ;
       c
 
     let wait c m =
       fun h' ->
          Mutex_o.lock c.mutex ;
+         assert(not !(c.stop));
          Mutex.unlock m
            { raise = (fun () -> assert false );
              return = (fun () -> ()) } ;
-         c.tasks <- (m,(h'.return)) :: c.tasks ;
+         c.tasks := (m,(h'.return)) :: !(c.tasks) ;
          Mutex_o.unlock c.mutex 
 
     (* The calling schema is:
@@ -779,14 +837,15 @@ struct
      *    another [condition_stub] call}} *)
     let condition_stub ~broadcast c = 
         Mutex_o.lock c.mutex ;
+        assert(not !(c.stop)) ;
         (* Condition task should be
          * very fast so this wait should
          * be negligible.. *)
-        if c.busy then
+        if !(c.busy) then
           Condition.wait c.pre_condition c.mutex ;
-        c.broadcast <- broadcast ;
-        assert(not c.busy);
-        c.busy <- true ;
+        c.broadcast := broadcast ;
+        assert(not !(c.busy));
+        c.busy := true ;
         ignore(Unix.write c.write " " 0 1) ;
         Condition.wait c.post_condition c.mutex ;
         Condition.signal c.pre_condition ;
