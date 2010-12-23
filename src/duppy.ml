@@ -664,7 +664,7 @@ struct
           locked = locked ;
           stop = stop ;
           tasks = tasks ;
-          mutex = Mutex.create () }
+          mutex = mutex }
       in
       Gc.finalise finalize m ;
       m
