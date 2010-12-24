@@ -126,21 +126,22 @@ struct
                           Some (fun () -> List.map t_of_task (task.handler l)))
       }
   
-  let add_t s item =
-    begin
-     match item.is_ready {r=[];w=[];x=[];t=0.} with
-       | Some f -> 
-           Mutex.lock s.ready_m ;
-           s.ready <- (item.prio,f) :: s.ready ;
-           Mutex.unlock s.ready_m
-       | None ->
-           Mutex.lock s.tasks_m ;
-           s.tasks <- item :: s.tasks ;
-           Mutex.unlock s.tasks_m ;
-    end ;
+  let add_t s items =
+    let f item = 
+      match item.is_ready {r=[];w=[];x=[];t=0.} with
+        | Some f -> 
+            Mutex.lock s.ready_m ;
+            s.ready <- (item.prio,f) :: s.ready ;
+            Mutex.unlock s.ready_m
+        | None ->
+            Mutex.lock s.tasks_m ;
+            s.tasks <- item :: s.tasks ;
+            Mutex.unlock s.tasks_m ;
+    in
+    List.iter f items ;
     wake_up s
   
-  let add s t  = add_t s (t_of_task t)
+  let add s t  = add_t s [t_of_task t]
 end
 
 open Task
@@ -225,7 +226,7 @@ let exec s (priorities:'a->bool) =
     in
       s.ready <- remaining ;
       Mutex.unlock s.ready_m ;
-      List.iter (add_t s) (task ()) ;
+      add_t s (task ()) ;
       true
   with Not_found -> false
 
