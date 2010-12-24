@@ -623,12 +623,8 @@ struct
       in
       let rec handler _ = 
          Mutex.lock mutex ;
-         (* I may be stepping on thin 
-          * ice here but let's try
-          * it.. *)
          if not !stop then
           begin
-           assert(not !locked);
            let tasks = 
               (* I don't think shuffling tasks
                * matters here.. *)
@@ -637,7 +633,7 @@ struct
                    tasks := l ;
                    locked := true ;
                    task x
-                | _ -> assert false
+                | _ -> []
            in
            Mutex.unlock mutex ;
            ignore(Unix.read x tmp 0 1024) ;
