@@ -127,9 +127,17 @@ struct
       }
   
   let add_t s item =
-    Mutex.lock s.tasks_m ;
-    s.tasks <- item :: s.tasks ;
-    Mutex.unlock s.tasks_m ;
+    begin
+     match item.is_ready {r=[];w=[];x=[];t=0.} with
+       | Some f -> 
+           Mutex.lock s.ready_m ;
+           s.ready <- (item.prio,f) :: s.ready ;
+           Mutex.unlock s.ready_m
+       | None ->
+           Mutex.lock s.tasks_m ;
+           s.tasks <- item :: s.tasks ;
+           Mutex.unlock s.tasks_m ;
+    end ;
     wake_up s
   
   let add s t  = add_t s (t_of_task t)
