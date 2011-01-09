@@ -82,16 +82,6 @@ type reply =
     reply_headers  : (string*string) list ;
     reply_data     : data }
 
-let date t = 
-  Printf.sprintf
-    "%02d-%02d-%04d %02d:%02d:%02d"
-    t.Unix.tm_mday
-    (t.Unix.tm_mon + 1)
-    (1900 + t.Unix.tm_year)
-    t.Unix.tm_hour
-    t.Unix.tm_min
-    t.Unix.tm_sec
-
 exception Assoc of string
 
 let assoc_uppercase x y =
@@ -124,7 +114,6 @@ let server_error status protocol =
   { reply_protocol = protocol ;
     reply_status   = status ;
     reply_headers  = [ "Content-Type","text/html; charset=UTF-8";
-                       "Date", date (Unix.gmtime (Unix.gettimeofday ()));
                        "Server", server ] ;
     reply_data     = data } 
 
@@ -136,6 +125,12 @@ let error_500 =
 
 let error_403 = 
   server_error (403,"Forbidden")
+
+let http_302 protocol uri = 
+  { reply_protocol = protocol ;
+    reply_status   = (302,"Found") ;
+    reply_headers  = ["Location",uri];
+    reply_data     = String "" }
 
 type socket_status = Keep | Close
 
@@ -199,61 +194,6 @@ let send_reply h reply =
     end 
     done
 
-let file_request path _ request = 
-  let uri = 
-    match request.request_uri with
-      | "/" -> "/index.html"
-      | s   -> s
-  in
-  let fname = 
-    Printf.sprintf "%s%s" path uri
-  in
-  if Sys.file_exists fname then
-    try
-      let fd = Unix.openfile fname [Unix.O_RDONLY] 0o640 in
-      let stats = Unix.fstat fd in
-      let headers =
-        [ "Date", date (Unix.gmtime (Unix.gettimeofday ()));
-          "Server", server;
-          "Content-Length", string_of_int (stats.Unix.st_size) ]
-      in
-      let headers = 
-        if Pcre.pmatch ~rex:(Pcre.regexp "\\.html$") fname then
-          ("Content-Type","text/html") :: headers
-        else if Pcre.pmatch ~rex:(Pcre.regexp "\\.css$") fname then
-          ("Content-Type","text/css") :: headers
-        else
-          headers
-      in
-      { reply_protocol = request.request_protocol ;
-        reply_status   = (200,"OK") ;
-        reply_headers  = headers ;
-        reply_data     = File fd }
-    with
-      | _ -> error_403 request.request_protocol
-  else
-    error_404 request.request_protocol
-
-let file_handler = 
-  (fun _ -> true),file_request !files_path
-
-let handlers = [file_handler]
-
-let handle_request h request = 
-  let f (check,handler) =
-    if check request then
-      duppy_raise (handler h request)
-    else
-      duppy_return ()
-  in
-  duppy_try
-   duppy_do
-     duppy_iter f handlers ;
-     duppy_return (error_404 request.request_protocol)
-   done
-  with
-    | reply -> duppy_return reply
-
 let parse_headers headers =
   let split_header l h =
     try
@@ -267,7 +207,301 @@ let parse_headers headers =
   in
   duppy_fold_left split_header [] headers
 
-let parse_request h r = 
+let index_uri path index protocol uri =
+  let uri =
+   try
+     let ret =
+        Pcre.extract ~rex:(Pcre.regexp "([^\\?]*)\\?")
+                     uri
+      in
+      ret.(1)
+   with
+     | Not_found -> uri
+  in
+  try
+   if Sys.is_directory 
+        (Printf.sprintf "%s%s" path uri) 
+   then
+     if uri.[String.length uri - 1] <> '/' then
+       duppy_raise (http_302 protocol (Printf.sprintf "%s/" uri)) 
+     else
+      begin
+       let index = Printf.sprintf "%s/%s" uri index in
+       if Sys.file_exists
+            (Printf.sprintf "%s/%s" path index) then
+         duppy_return index
+       else
+         duppy_return uri
+      end
+   else
+      duppy_return uri
+  with
+    | _ -> duppy_return uri
+
+let file_request path _ request = 
+  let uri = 
+    try
+      let ret =
+        Pcre.extract ~rex:(Pcre.regexp "([^\\?]*)\\?.*")
+                     request.request_uri
+      in
+      ret.(1)
+    with
+      | Not_found -> request.request_uri
+  in
+  duppy uri = 
+    index_uri path "index.html" 
+                   request.request_protocol uri 
+  in
+  let fname = 
+    Printf.sprintf "%s%s" path uri
+  in
+  if Sys.file_exists fname then
+    try
+      let fd = Unix.openfile fname [Unix.O_RDONLY] 0o640 in
+      let stats = Unix.fstat fd in
+      let headers =
+        [ "Server", server;
+          "Content-Length", string_of_int (stats.Unix.st_size) ]
+      in
+      let headers = 
+        if Pcre.pmatch ~rex:(Pcre.regexp "\\.html$") fname then
+          ("Content-Type","text/html") :: headers
+        else if Pcre.pmatch ~rex:(Pcre.regexp "\\.css$") fname then
+          ("Content-Type","text/css") :: headers
+        else
+          headers
+      in
+      duppy_raise
+       { reply_protocol = request.request_protocol ;
+         reply_status   = (200,"OK") ;
+         reply_headers  = headers ;
+         reply_data     = File fd }
+    with
+      | _ -> duppy_raise (error_403 request.request_protocol)
+  else
+    duppy_raise (error_404 request.request_protocol)
+
+let file_handler = 
+  (fun _ -> duppy_return true),file_request !files_path
+
+let cgi_handler process path h request =
+  let uri,args,suffix = 
+    try
+      let ret = 
+        Pcre.extract ~rex:(Pcre.regexp "([^\\?]*)\\?(.*)")
+                     request.request_uri 
+      in
+      begin
+       try
+        let ans = 
+          Pcre.extract ~rex:(Pcre.regexp "^([^/]*)/([^&=]*)$")
+                       ret.(2)
+        in
+        ret.(1),ans.(1),ans.(2)
+       with 
+         | Not_found -> ret.(1),ret.(2),""
+      end
+    with
+      | Not_found -> request.request_uri,"",""
+  in
+  duppy script = 
+    index_uri path "index.php" 
+              request.request_protocol
+              uri 
+  in
+  let script = 
+    Printf.sprintf "%s%s" path script
+  in
+  let env = 
+    Printf.sprintf
+        "export SERVER_SOFTWARE=Duppy-httpd/1.0; \
+         export SERVER_NAME=localhost; \
+         export GATEWAY_INTERFACE=CGI/1.1; \
+         export SERVER_PROTOCOL=%s; \
+         export SERVER_PORT=%d; \
+         export REQUEST_METHOD=%s; \
+         export REQUEST_URI=%s; \
+         export REDIRECT_STATUS=200; \
+         export SCRIPT_FILENAME=%s"
+       (string_of_protocol (request.request_protocol))
+       !port
+       (string_of_method (request.request_method))
+       (Filename.quote uri)
+       (Filename.quote script)
+  in
+  let env = 
+    Printf.sprintf "%s; export QUERY_STRING=%s"
+                   env
+                   (Filename.quote args)
+  in
+  let env = 
+    let tr_suffix = 
+      Printf.sprintf "%s%s" path suffix 
+    in
+    (* Trick ! *)
+    let tr_suffix = 
+      Printf.sprintf "%s/%s" (Filename.dirname tr_suffix)
+                             (Filename.basename tr_suffix)
+    in
+    Printf.sprintf "%s; export PATH_TRANSLATED=%s; \
+                        export PATH_INFO=%s"
+                   env
+                   (Filename.quote tr_suffix)
+                   (Filename.quote suffix)
+  in
+  let sanitize s =
+    Pcre.replace ~pat:"-" ~templ:"_" (String.uppercase s)
+  in
+  let headers = 
+    List.map (fun (x,y) -> (sanitize x,y)) request.request_headers
+  in
+  let append env key = 
+    if List.mem_assoc key headers then
+      Printf.sprintf "%s; export %s=%s"
+        env key (Filename.quote (List.assoc key headers))
+    else
+      env
+  in
+  let env = append env "CONTENT_TYPE" in
+  let env = append env "CONTENT_LENGTH" in
+  duppy env = 
+    if List.mem_assoc "AUTHORIZATION" headers then
+     begin
+      let ret = 
+        Pcre.extract ~rex:(Pcre.regexp "(^[^\\s]*\\s.*)$") 
+                     (List.assoc "AUTHORIZATION" headers)
+      in
+      if Array.length ret > 0 then
+        duppy_return (Printf.sprintf "%s; extract AUTH_TYPE=%s" env (ret.(1)))
+      else
+        duppy_raise error_500 
+     end
+    else
+      duppy_return env
+  in
+  let f env (x,y) = 
+    Printf.sprintf "%s; export HTTP_%s=%s"
+      env x (Filename.quote y)
+  in
+  let env = List.fold_left f env headers in
+  let data = 
+    match request.request_data with
+      | None -> ""
+      | String s -> s
+      | _ -> assert false (* not implemented *)
+  in
+  let process = 
+    Printf.sprintf "%s; %s 2>/dev/null"
+      env process
+  in
+  let in_c,out_c = 
+    Unix.open_process process
+  in
+  let out_s = 
+    Unix.descr_of_out_channel out_c
+  in
+  let h =
+    { h with
+       Duppy.Monad.Io.
+         socket = out_s ;
+         data   = ""
+    }
+  in
+  duppy () = 
+    duppy_write
+      data
+    with
+      { priority = Non_blocking ;
+        handler  = h }
+  in
+  let in_s = 
+    Unix.descr_of_in_channel in_c 
+  in
+  let h = 
+    { h with
+       Duppy.Monad.Io.
+         socket = in_s ;
+         data   = ""
+    }
+  in
+  duppy headers = 
+    duppy_read
+      Duppy.Io.Split "[\r]?\n[\r]?\n"
+    with
+      { priority = Non_blocking ;
+        handler  = h }
+  in
+  duppy data = 
+    duppy_try
+     duppy_read_all
+       in_s
+     with
+       { priority = Non_blocking ;
+         scheduler = h.Duppy.Monad.Io.scheduler }
+    with
+      | (s,_) -> duppy_return s
+  in
+  let data = 
+    Printf.sprintf "%s%s" h.Duppy.Monad.Io.data data 
+  in
+  ignore(Unix.close_process (in_c,out_c)) ;
+  duppy headers = 
+    let headers = Pcre.split ~pat:"\r\n" headers in
+    parse_headers headers 
+  in
+  duppy status,headers = 
+    if List.mem_assoc "Status" headers then
+     try
+      let ans = Pcre.extract ~rex:(Pcre.regexp "([\\d]+)\\s(.*)")
+                             (List.assoc "Status" headers) 
+      in
+      duppy_return
+       ((int_of_string ans.(1),
+         ans.(2)),
+        List.filter (fun (x,y) -> x <> "Status") headers)
+     with _ -> duppy_raise error_500
+    else duppy_return ((200,"OK"),headers)
+  in
+  let headers = 
+    ("Content-length",string_of_int (String.length data))::
+      headers
+  in
+  duppy_raise
+    { reply_protocol = request.request_protocol ;
+      reply_status   = status ;
+      reply_headers  = headers ;
+      reply_data     = String data }
+
+let php_handler = 
+  (fun request -> 
+     duppy uri = 
+       index_uri !files_path "index.php" 
+                 request.request_protocol
+                 request.request_uri 
+     in
+     duppy_return (Pcre.pmatch ~rex:(Pcre.regexp "\\.php$") uri)),
+  cgi_handler "php-cgi" !files_path
+
+let handlers = [php_handler;file_handler]
+
+let handle_request h request = 
+  let f (check,handler) =
+    duppy check = check request in
+    if check then
+      handler h request
+    else
+      duppy_return ()
+  in
+  duppy_try
+   duppy_do
+     duppy_iter f handlers ;
+     duppy_return (error_404 request.request_protocol)
+   done
+  with
+    | reply -> duppy_return reply
+
+let parse_request h r =
   try
     let headers = Pcre.split ~pat:"\r\n" r in
     duppy request,headers =
@@ -309,7 +543,7 @@ let parse_request h r =
             in 
             match len with
               | 0 -> duppy_return None
-              | d -> 
+              | d ->
                   duppy data = 
                     duppy_read
                       Duppy.Io.Length d
@@ -329,14 +563,9 @@ let parse_request h r =
     | _ -> duppy_raise error_500
 
 let handle_client socket =
+  (* Read and process lines *)
   let on_error e =
-     match e with
-       | Duppy.Io.Io_error -> ()
-       | Duppy.Io.Unix (c,p,m) ->
-           Printf.printf "%s" (Printexc.to_string
-                                (Unix.Unix_error (c,p,m)))
-       | Duppy.Io.Unknown e ->
-           Printf.printf "%s" (Printexc.to_string e)
+    error_500
   in
   let h =
     { Duppy.Monad.Io.
@@ -345,24 +574,15 @@ let handle_client socket =
        data      = "";
        on_error  = on_error }
   in
-  (* Read and process lines *)
-  let exec =
-    duppy data =
-       duppy_read
-         Duppy.Io.Split "\r\n\r\n"
-       with
-         { priority = Non_blocking ;
-           handler  = h }
-    in
+  let rec exec () =
     duppy (keep,reply) = 
       duppy_try
-        let h =
-           { h with
-               Duppy.Monad.Io.
-                on_error =
-                 (fun e ->
-                   on_error e;
-                   error_500) }
+        duppy data =
+          duppy_read
+            Duppy.Io.Split "\r\n\r\n"
+          with
+            { priority = Non_blocking ;
+              handler  = h }
         in
         duppy request =
           parse_request h data
@@ -393,25 +613,22 @@ let handle_client socket =
     duppy_do
         send_reply h reply ;
         if keep = Keep then
-          duppy_return ()
+          exec ()
         else
-          duppy_raise ()
+          duppy_return ()
     done
   in
-  let rec run () =
-    let raise () = 
-          try
-            Unix.close socket
-          with
-            | _ -> ()
-    in 
-    duppy_run 
-      exec
+  let finish _ = 
+    try
+      Unix.close socket
     with
-      { return = run ;
-        raise = raise }
-  in
-  run ()
+      | _ -> ()
+  in 
+  duppy_run 
+    exec ()
+  with
+    { return = finish ;
+      raise = finish }
 
 let new_queue ~priority ~name () =
    let priorities p = p = priority in
@@ -425,6 +642,11 @@ let bind_addr = Unix.ADDR_INET(bind_addr_inet, !port)
 let max_conn = 100
 let sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 
 let () = 
+  (* See http://caml.inria.fr/mantis/print_bug_page.php?bug_id=4640
+   * for this: we want Unix EPIPE error and not SIGPIPE, which
+   * crashes the program.. *)
+  Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
+  ignore (Unix.sigprocmask Unix.SIG_BLOCK [Sys.sigpipe]);
   Unix.setsockopt sock Unix.SO_REUSEADDR true ;
   let rec incoming _ =
    begin
