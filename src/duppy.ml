@@ -902,7 +902,9 @@ struct
          let process x =
            let s = 
              match x with
-               | s, None -> s
+               | s, None -> 
+                   h.data <- "" ;
+                   s
                | s, Some s' -> 
                    h.data <- s' ;
                    s
