@@ -145,6 +145,9 @@ EXTEND Gram
         | "duppy_unlock" ->
             <:expr< Duppy.Monad.Mutex.unlock >>
 
+        | "duppy_delay" ->
+            <:expr< Duppy.Monad.Io.delay >>
+
         | "duppy_mutex" ->
            <:expr< Duppy.Monad.Mutex.create >>
 
@@ -175,7 +178,7 @@ EXTEND Gram
                  patt_assoc "handler" l
                with
                  | Not_found ->
-                    invalid_arg ("Invalid arguments for duppy_exec")
+                    invalid_arg ("Invalid arguments for duppy_write")
              in
              gen_write ~p h _loc e
 
@@ -186,7 +189,7 @@ EXTEND Gram
                  patt_assoc "handler" l
                with
                  | Not_found ->
-                    invalid_arg ("Invalid arguments for duppy_exec")
+                    invalid_arg ("Invalid arguments for duppy_write_big_array")
              in
              <:expr< Duppy.Monad.Io.write_bigarray ~priority:$p$ $h$ $e$ >>
 
@@ -197,9 +200,20 @@ EXTEND Gram
                  patt_assoc "handler" l
                with
                  | Not_found ->
-                    invalid_arg ("Invalid arguments for duppy_exec")
+                    invalid_arg ("Invalid arguments for duppy_read")
              in
              <:expr< Duppy.Monad.Io.read ~priority:$p$ ~marker:$e$ $h$ >>
+
+        | "duppy_read_all"; e = expr; "with"; "{"; l = duppy_match; "}" ->
+             let p,s =
+               try
+                 patt_assoc "priority" l,
+                 patt_assoc "scheduler" l
+               with
+                 | Not_found ->
+                    invalid_arg ("Invalid arguments for duppy_read_all")
+             in
+             <:expr< Duppy.Monad.Io.read_all ~priority:$p$ $s$ $e$ >>
 
         ] ];
 

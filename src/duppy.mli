@@ -182,11 +182,13 @@ sig
     *
     * The [on_error] function is used when reading failed on the socket.
     * Depending on your usage, it can be a hard failure, or simply a lost client.
+    * The string passed to [on_error] contains data read before error 
+    * occured.
     * @param recursive recursively read and process, default: [true]
     * @param init initial string for reading, default: [""]
     * @param on_error function used when read failed, default: [fun _ -> ()] *)
   val read :
-        ?recursive:bool -> ?init:string -> ?on_error:(failure -> unit) ->
+        ?recursive:bool -> ?init:string -> ?on_error:(string*failure -> unit) ->
         priority:'a -> 'a scheduler -> Unix.file_descr -> 
         marker -> (string*(string option) -> unit) -> unit
 
@@ -365,16 +367,17 @@ sig
       * [on_error] is a function that transforms
       * an error raised by [Duppy.Io] to a reply
       * used to terminate the computation.
-      * [init] is used internaly. It should 
-      * be initialized with [""] and should
-      * not be used in user's code. It contains the
+      * [data] is an internal data buffer. It should 
+      * be initialized with [""]. It contains the
       * remaining data that was received when 
-      * using [read] *) 
+      * using [read]. If an error occured, 
+      * [data] contain data read before the 
+      * error. *) 
     type ('a,'b) handler =
-      { scheduler              : 'a scheduler ;
-        socket                 : Unix.file_descr ;
-        mutable init           : string ;
-        on_error               : Io.failure -> 'b }
+      { scheduler    : 'a scheduler ;
+        socket       : Unix.file_descr ;
+        mutable data : string ;
+        on_error     : Io.failure -> 'b }
 
     (** {2 Execution flow } *)
 
@@ -393,6 +396,10 @@ sig
     val exec : ?delay:float -> priority:'a -> ('a,'b) handler ->
                ('c,'b) t -> ('c,'b) t
 
+    (** [delay ~priority h d] creates a computation that returns
+      * [unit] after delay [d] in seconds. *)
+    val delay : priority:'a -> ('a,'b) handler -> float -> (unit,'b) t
+
     (** {2 Read/write } *)
 
     (** [read ~priority ~marker h] creates a 
@@ -403,6 +410,14 @@ sig
       * reads data from a socket. *)
     val read : priority:'a -> marker:Io.marker -> 
                ('a,'b) handler -> (string,'b) t
+
+    (** [read_all ~priority s sock] creates a 
+      * computation that reads all data from [sock]
+      * and returns it. Raised value contains data
+      * read before an error occured. *)
+    val read_all : priority:'a -> 
+                   'a scheduler -> 
+                   Unix.file_descr -> (string,(string*Io.failure)) t
 
     (** [write ~priority h s] creates a computation
       * that writes string [s] to [h.socket]. This

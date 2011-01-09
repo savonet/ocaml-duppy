@@ -73,7 +73,7 @@ let handle_client socket =
     { Duppy.Monad.Io.
        scheduler = scheduler ;
        socket    = socket ;
-       init      = "";
+       data      = "";
        on_error  = on_error }
   in
   (* Read and process lines *)

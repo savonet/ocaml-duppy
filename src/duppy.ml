@@ -448,9 +448,10 @@ struct
        try
         f x
        with
-         | Io -> on_error Io_error; []
-         | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
-         | e -> on_error (Unknown e); []
+         | Io -> on_error (Buffer.contents b,Io_error); []
+         | Unix.Unix_error(x,y,z) -> 
+                 on_error (Buffer.contents b,Unix(x,y,z)); []
+         | e ->  on_error (Buffer.contents b,Unknown e); []
       in
       match ret with
         | Some x ->
@@ -473,9 +474,10 @@ struct
       try
         f x 
       with
-        | Io -> on_error Io_error; []
-        | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
-        | e -> on_error (Unknown e); []
+        | Io -> on_error (Buffer.contents b,Io_error); []
+        | Unix.Unix_error(x,y,z) -> 
+                on_error (Buffer.contents b,Unix(x,y,z)); []
+        | e ->  on_error (Buffer.contents b,Unknown e); []
     in
       (* First one is without read,
        * in case init contains the wanted match. *)
@@ -870,10 +872,10 @@ struct
   module Io =
   struct
     type ('a,'b) handler = 
-      { scheduler              : 'a scheduler ;
-        socket                 : Unix.file_descr ;
-        mutable init           : string ;
-        on_error               : Io.failure -> 'b }
+      { scheduler    : 'a scheduler ;
+        socket       : Unix.file_descr ;
+        mutable data : string ;
+        on_error     : Io.failure -> 'b }
  
     let rec exec ?(delay=0.) ~priority h f = 
       (fun h' -> 
@@ -892,6 +894,9 @@ struct
              events   = [`Delay delay];
              handler  = handler })
 
+    let delay ~priority h delay = 
+      exec ~delay ~priority h (return ())
+
     let read ~priority ~marker h = 
       (fun h' -> 
          let process x =
@@ -899,19 +904,48 @@ struct
              match x with
                | s, None -> s
                | s, Some s' -> 
-                   h.init <- s' ;
+                   h.data <- s' ;
                    s
            in 
            h'.return s
          in
-         let init = h.init in
-         h.init <- "" ;
-         let on_error x = 
+         let init = h.data in
+         h.data <- "" ;
+         let on_error (s,x) =
+            h.data <- s ; 
             h'.raise (h.on_error x)
          in
          Io.read ~priority ~init ~recursive:false 
                  ~on_error h.scheduler h.socket 
                  marker process)
+
+   let read_all ~priority s sock = 
+     let handler =
+          { scheduler = s ;
+            socket = sock ;
+            data = "" ;
+            on_error = (fun e -> e) }
+     in
+     let buf = Buffer.create 1024 in
+     let rec f () =
+       let data =
+         read ~priority 
+              ~marker:(Io.Length 1024)
+              handler
+       in
+       let process data = 
+         Buffer.add_string buf data ;
+         f ()
+        in
+        data >>= process
+     in
+     let catch_ret e =
+       Buffer.add_string buf handler.data ;
+       match e with
+           | Io.Io_error -> return (Buffer.contents buf)
+           | e -> raise (Buffer.contents buf,e)
+     in
+     catch (f ()) catch_ret
 
     let write ~priority h s =
       (fun h' ->

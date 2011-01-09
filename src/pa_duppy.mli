@@ -144,6 +144,7 @@
   * [delay] is an optional field.
   *
   * }
+  * {- [duppy_delay] is equivalent to [Duppy.Monad.Io.delay]}
   * {- {[duppy_read
   *  marker
   * with
@@ -154,6 +155,18 @@
   *
   * {[ Duppy.Monad.Io.read
   *  ~priority:p h marker ]}
+  *
+  * }
+  * {- {[duppy_read_all
+  *  socket
+  * with
+  *   { priority  = p ;
+  *     scheduler = s } ]}
+  *
+  * is equivalent to:
+  *
+  * {[ Duppy.Monad.Io.read_all
+  *  ~priority:p s socket ]}
   *
   * }
   * {- {[duppy_write
