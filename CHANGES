@@ -6,6 +6,7 @@
   in Duppy.Async
 * Make calls to [stop] and [wake_up]
   thread-safe in Duppy.Async
+* Catch Unix.EINTR when calling Unix.select.
 
 0.3.2 (19-08-2010)
 =====

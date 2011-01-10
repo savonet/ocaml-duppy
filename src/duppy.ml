@@ -170,7 +170,17 @@ let process s log =
            (time ()) timeout
            (List.length e.r) (List.length e.w) (List.length e.x)) ;
     let r,w,x =
-      Unix.select e.r e.w e.x timeout
+      (* [EINTR] means that select was interrupted by 
+       * a signal before any of the selected events 
+       * occurred and before the timeout interval expired.
+       * We catch it and restart.. *)
+      let rec f () = 
+        try
+          Unix.select e.r e.w e.x timeout
+        with
+          | Unix.Unix_error (Unix.EINTR,_,_) -> f ()
+      in
+      f ()
     in
       log (Printf.sprintf "Left select at %f (%d/%d/%d)." (time ())
              (List.length r) (List.length w) (List.length x)) ;
