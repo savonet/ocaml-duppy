@@ -26,10 +26,25 @@
 
 #include <errno.h>
 
+/* On native Windows platforms, many macros are not defined.  */ 
+# if (defined _WIN32 || defined __WIN32__) && ! defined __CYGWIN__ 
+
+#ifndef EWOULDBLOCK 
+#define EWOULDBLOCK     EAGAIN 
+#endif 
+
+#endif
+
+#ifdef WIN32
+#define GET_FD(fh) _open_osfhandle(fh,0)
+#else
+#define GET_FD(fh) Int_val(fh)
+#endif
+
 CAMLprim value ocaml_duppy_write_ba(value _fd, value ba, value _ofs, value _len)
 {
   CAMLparam1(ba) ;
-  int fd = Int_val(_fd);
+  int fd = GET_FD(_fd);
   long ofs = Long_val(_ofs);
   long len = Long_val(_len);
   void *buf = Caml_ba_data_val(ba);

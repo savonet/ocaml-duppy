@@ -11,8 +11,9 @@ OCAMLFIND = @OCAMLFIND@
 OCAMLFIND_LDCONF = @OCAMLFIND_LDCONF@
 OCAMLC = @OCAMLC@ -thread
 OCAMLOPT = @OCAMLOPT@ -thread
-BEST = @BEST@
+OCAMLBEST = @OCAMLBEST@
 OCAMLMKTOP = @OCAMLMKTOP@
+OCAMLMKLIB = @OCAMLMKLIB@
 OCAMLCP = @OCAMLCP@
 OCAMLDEP = @OCAMLDEP@
 OCAMLLEX = @OCAMLLEX@
@@ -32,6 +33,7 @@ ACLIBS = @LIBS@
 LDFLAGS = @LDFLAGS@
 CLIBS = $(ACLIBS:-l%=%)
 CC = @CC@
+AR = @AR@
 CFLAGS = @CFLAGS@ -Wall -DCAML_NAME_SPACE
 CPPFLAGS = @CPPFLAGS@
 INCDIRS = @INC@
@@ -39,7 +41,7 @@ NO_CUSTOM = yes
 OCAMLFLAGS = @OCAMLFLAGS@
 TRASH = pa_duppy.cmo pa_duppy.cmi
 
-all: @PA_DUPPY@ $(BEST)
+all: @PA_DUPPY@ $(OCAMLBEST)
 
 pa_duppy.cmo: pa_duppy.ml pa_duppy.cmi
 	$(OCAMLFIND) ocamlc -c -package camlp4 -package camlp4.quotations.o -package camlp4.extend -syntax camlp4o pa_duppy.ml
