@@ -36,7 +36,7 @@
 #endif
 
 #ifdef WIN32
-#define GET_FD(fh) _open_osfhandle(fh,0)
+#define GET_FD(fh) win_CRT_fd_of_filedescr(fh)
 #else
 #define GET_FD(fh) Int_val(fh)
 #endif
