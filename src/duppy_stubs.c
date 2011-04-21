@@ -43,7 +43,7 @@
 
 CAMLprim value ocaml_duppy_write_ba(value _fd, value ba, value _ofs, value _len)
 {
-  CAMLparam1(ba) ;
+  CAMLparam2(ba,_fd) ;
   int fd = GET_FD(_fd);
   long ofs = Long_val(_ofs);
   long len = Long_val(_len);
