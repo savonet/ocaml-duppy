@@ -514,7 +514,8 @@ struct
         | _ ->
             0,fun _ _ -> 0
     in
-    let rec f pos l = 
+    let rec f pos l =
+     try   
       assert (List.exists ((=) (`Write socket)) l) ;
       let len = length - pos in
       let n = write pos len in
@@ -522,30 +523,15 @@ struct
       else
       begin
         if n < len then
-          begin
-            (* Catch all exceptions.. *)
-            let f x y =
-             try
-              f x y
-             with
-               | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
-               | e -> on_error (Unknown e); []
-            in
-            [{ priority = priority ; events = [`Write socket] ;
-               handler = f (pos+n) }]
-          end
+          [{ priority = priority ; events = [`Write socket] ;
+             handler = f (pos+n) }]
         else
           (exec () ; [])
       end
+     with
+       | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
+       | e -> on_error (Unknown e); []
     in  
-    (* Catch all exceptions.. *)
-    let f x y =
-      try
-        f x y
-      with
-        | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
-        | e -> on_error (Unknown e); []
-    in
     if length > 0 then
         let task = 
           {
