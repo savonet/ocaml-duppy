@@ -1,7 +1,7 @@
-0.4.0 ()
+0.4.0 (26-06-2011)
 =====
-* Added Server and Server.Io, two
-  monads used to write server code.
+* Added a monad API to write 
+  server code.
 * Close both sides of the pipe
   in Duppy.Async
 * Make calls to [stop] and [wake_up]
