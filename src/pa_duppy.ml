@@ -55,9 +55,10 @@ let rec gen_do _loc e =
   in
   aux (Ast.list_of_expr e [])
 
-let rec gen_write ~p h _loc e =
+let rec gen_write ~t ~p h _loc e =
   let do_write e = 
     <:expr< Duppy.Monad.Io.write
+                 ?timeout:$t$
                  ~priority:$p$
                  $h$ ($e$) >>
   in
@@ -180,7 +181,13 @@ EXTEND Gram
                  | Not_found ->
                     invalid_arg ("Invalid arguments for duppy_write")
              in
-             gen_write ~p h _loc e
+             let t =
+               try
+                 let t = patt_assoc "timeout" l in
+                 <:expr< Some $t$ >>
+               with Not_found -> <:expr< None >>
+             in
+             gen_write ~t ~p h _loc e
 
         | "duppy_write_bigarray"; e = expr; "with"; "{"; l = duppy_match; "}" ->
              let p,h =
@@ -191,7 +198,13 @@ EXTEND Gram
                  | Not_found ->
                     invalid_arg ("Invalid arguments for duppy_write_big_array")
              in
-             <:expr< Duppy.Monad.Io.write_bigarray ~priority:$p$ $h$ $e$ >>
+             let t =
+               try
+                 let t = patt_assoc "timeout" l in
+                 <:expr< Some $t$ >>
+               with Not_found -> <:expr< None >>
+             in
+             <:expr< Duppy.Monad.Io.write_bigarray ?timeout:$t$ ~priority:$p$ $h$ $e$ >>
 
         | "duppy_read"; e = expr; "with"; "{"; l = duppy_match; "}" ->
              let p,h =
@@ -202,7 +215,13 @@ EXTEND Gram
                  | Not_found ->
                     invalid_arg ("Invalid arguments for duppy_read")
              in
-             <:expr< Duppy.Monad.Io.read ~priority:$p$ ~marker:$e$ $h$ >>
+             let t =
+               try
+                 let t = patt_assoc "timeout" l in
+                 <:expr< Some $t$ >>
+               with Not_found -> <:expr< None >>
+             in
+             <:expr< Duppy.Monad.Io.read ?timeout:$t$ ~priority:$p$ ~marker:$e$ $h$ >>
 
         | "duppy_read_all"; e = expr; "with"; "{"; l = duppy_match; "}" ->
              let p,s =
@@ -213,7 +232,13 @@ EXTEND Gram
                  | Not_found ->
                     invalid_arg ("Invalid arguments for duppy_read_all")
              in
-             <:expr< Duppy.Monad.Io.read_all ~priority:$p$ $s$ $e$ >>
+             let t =
+               try
+                 let t = patt_assoc "timeout" l in
+                 <:expr< Some $t$ >>
+               with Not_found -> <:expr< None >>
+             in
+             <:expr< Duppy.Monad.Io.read_all ?timeout:$t$ ~priority:$p$ $s$ $e$ >>
 
         ] ];
 

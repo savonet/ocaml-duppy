@@ -149,48 +149,56 @@
   *  marker
   * with
   *   { priority = p ;
-  *     handler  = h } ]} 
+  *     handler  = h ;
+  *     timeout  = t } ]} 
   *
   * is equivalent to:
   *
   * {[ Duppy.Monad.Io.read
-  *  ~priority:p h marker ]}
+  *  ~timeout:t ~priority:p h marker ]}
   *
+  * Timeout parameter is optional.
   * }
   * {- {[duppy_read_all
   *  socket
   * with
   *   { priority  = p ;
-  *     scheduler = s } ]}
+  *     handler   = h ;
+  *     timeout   = t } ]}
   *
   * is equivalent to:
   *
   * {[ Duppy.Monad.Io.read_all
-  *  ~priority:p s socket ]}
+  *  ~timeout:t ~priority:p s socket ]}
   *
+  * Timeout parameter is optional.
   * }
   * {- {[duppy_write
   *  s
   * with
   *   { priority = p ;
-  *     handler  = h } ]}
+  *     handler  = h ;
+  *     timeout  = t } ]}
   *
   * is equivalent to:
   *
   * {[ Duppy.Monad.Io.write
-  *  ~priority:p ~string:s h ]}
+  *  ~timeout:t ~priority:p ~string:s h ]}
   *
+  * Timeout parameter is optional.
   * }
   * {- {[duppy_write_bigarray
   *  ba
   * with
   *   { priority = p ;
-  *     handler  = h } ]}
+  *     handler  = h ;
+  *     timeout  = t } ]}
   *
   * is equivalent to:
   *
   * {[ Duppy.Monad.Io.write
-  *  ~priority:p ~bigarray:ba h ]}
+  *  ~timeout:t ~priority:p ~bigarray:ba h ]}
   *
+  * Timeout parameter is optional.
   * }}
   *)

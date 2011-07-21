@@ -1,3 +1,9 @@
+0.4.1 ()
+=====
+* Added optional timeout for
+  all [Duppy.Io] and [Duppy.Monad.Io] 
+  operations.
+
 0.4.0 (26-06-2011)
 =====
 * Added a monad API to write 

@@ -388,21 +388,35 @@ end
 module Io = 
 struct
   type marker = Length of int | Split of string
-  type failure = Io_error | Unix of Unix.error*string*string | Unknown of exn
+  type failure = 
+    | Io_error 
+    | Unix of Unix.error*string*string 
+    | Unknown of exn
+    | Timeout
 
   exception Io
+  exception Timeout_exc
 
   type bigarray = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
 
   external ba_write : Unix.file_descr -> bigarray -> int -> int -> int = "ocaml_duppy_write_ba"
 
   let read ?(recursive=false) ?(init="") ?(on_error=fun _ -> ())
-           ~priority (scheduler:'a scheduler) socket marker exec = 
+           ?timeout ~priority (scheduler:'a scheduler) 
+           socket marker exec = 
     let length = 1024 in
     let b = Buffer.create length in
     let buf = String.make length ' ' in
     Buffer.add_string b init ;
+    let events,check_timeout = 
+      match timeout with
+        | None -> [`Read socket], fun _ -> false
+        | Some f -> [`Read socket; `Delay f],
+                    (List.mem (`Delay f))
+    in
     let rec f l =
+      if check_timeout l then
+        raise Timeout_exc ;
       if (List.mem (`Read socket) l) then
        begin
         let input = Unix.read socket buf 0 length in
@@ -459,6 +473,7 @@ struct
         f x
        with
          | Io -> on_error (Buffer.contents b,Io_error); []
+         | Timeout_exc -> on_error (Buffer.contents b,Timeout); []
          | Unix.Unix_error(x,y,z) -> 
                  on_error (Buffer.contents b,Unix(x,y,z)); []
          | e ->  on_error (Buffer.contents b,Unknown e); []
@@ -470,13 +485,13 @@ struct
                 | s,Some s' when recursive ->
                      exec (s,None) ;
                      [{ priority = priority ; 
-                        events = [`Read socket] ;
+                        events = events ;
                         handler = f }]
                 | _ -> exec x; []
             end
         | None ->
              [{ priority = priority ; 
-                events = [`Read socket] ;
+                events = events ;
                 handler = f }]
     in
     (* Catch all exceptions.. *)
@@ -485,12 +500,15 @@ struct
         f x 
       with
         | Io -> on_error (Buffer.contents b,Io_error); []
+        | Timeout_exc -> on_error (Buffer.contents b,Timeout); []
         | Unix.Unix_error(x,y,z) -> 
                 on_error (Buffer.contents b,Unix(x,y,z)); []
         | e ->  on_error (Buffer.contents b,Unknown e); []
     in
       (* First one is without read,
-       * in case init contains the wanted match. *)
+       * in case init contains the wanted match. 
+       * Unless the user sets timeout to 0., this
+       * should not interfer with user-defined timeout.. *)
       let task = 
        {
          priority = priority ;
@@ -501,7 +519,7 @@ struct
       add scheduler task
 
   let write ?(exec=fun () -> ()) ?(on_error=fun _ -> ()) 
-            ?bigarray ?string ~priority
+            ?bigarray ?string ?timeout ~priority
             (scheduler:'a scheduler) socket = 
     let length,write = 
       match string,bigarray with
@@ -514,8 +532,16 @@ struct
         | _ ->
             0,fun _ _ -> 0
     in
+    let events,check_timeout =
+      match timeout with
+        | None -> [`Write socket], fun _ -> false
+        | Some f -> [`Write socket; `Delay f],
+                    (List.mem (`Delay f))
+    in
     let rec f pos l =
-     try   
+     try
+      if check_timeout l then
+       raise Timeout_exc ;
       assert (List.exists ((=) (`Write socket)) l) ;
       let len = length - pos in
       let n = write pos len in
@@ -529,6 +555,7 @@ struct
           (exec () ; [])
       end
      with
+       | Timeout_exc -> on_error Timeout; []
        | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
        | e -> on_error (Unknown e); []
     in  
@@ -536,7 +563,7 @@ struct
         let task = 
           {
             priority = priority ;
-            events = [`Write socket] ;
+            events = events ;
             handler  = (f 0)
           }
         in
@@ -893,7 +920,7 @@ struct
     let delay ~priority h delay = 
       exec ~delay ~priority h (return ())
 
-    let read ~priority ~marker h = 
+    let read ?timeout ~priority ~marker h = 
       (fun h' -> 
          let process x =
            let s = 
@@ -913,11 +940,11 @@ struct
             h.data <- s ; 
             h'.raise (h.on_error x)
          in
-         Io.read ~priority ~init ~recursive:false 
+         Io.read ?timeout ~priority ~init ~recursive:false 
                  ~on_error h.scheduler h.socket 
                  marker process)
 
-   let read_all ~priority s sock = 
+   let read_all ?timeout ~priority s sock = 
      let handler =
           { scheduler = s ;
             socket = sock ;
@@ -927,7 +954,7 @@ struct
      let buf = Buffer.create 1024 in
      let rec f () =
        let data =
-         read ~priority 
+         read ?timeout ~priority 
               ~marker:(Io.Length 1024)
               handler
        in
@@ -945,7 +972,7 @@ struct
      in
      catch (f ()) catch_ret
 
-    let write ~priority h s =
+    let write ?timeout ~priority h s =
       (fun h' ->
          let on_error x =
            h'.raise (h.on_error x)
@@ -953,10 +980,10 @@ struct
          let exec () = 
            h'.return ()
          in
-         Io.write ~priority ~on_error ~exec 
+         Io.write ?timeout ~priority ~on_error ~exec 
                   ~string:s h.scheduler h.socket)
 
-    let write_bigarray ~priority h ba =
+    let write_bigarray ?timeout ~priority h ba =
       (fun h' ->
          let on_error x =
            h'.raise (h.on_error x)
@@ -964,7 +991,7 @@ struct
          let exec () =
            h'.return ()
          in
-         Io.write ~priority ~on_error ~exec
+         Io.write ?timeout ~priority ~on_error ~exec
                   ~bigarray:ba h.scheduler h.socket)
   end
 end

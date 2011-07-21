@@ -167,7 +167,11 @@ sig
     * [Io_error] is raised when reading or writing
     * returned 0. This usually means that the socket
     * was closed. *)
-  type failure = Io_error | Unix of Unix.error*string*string | Unknown of exn
+  type failure = 
+    | Io_error 
+    | Unix of Unix.error*string*string 
+    | Unknown of exn
+    | Timeout
 
   (** Wrapper to perform a read on a socket and trigger a function when
     * a marker has been detected, or enough data has been read.
@@ -186,10 +190,15 @@ sig
     * occured.
     * @param recursive recursively read and process, default: [true]
     * @param init initial string for reading, default: [""]
-    * @param on_error function used when read failed, default: [fun _ -> ()] *)
+    * @param on_error function used when read failed, default: [fun _ -> ()] 
+    * @param timeout Terminate with [Timeout] failure if nothing has been read
+    *                after the given amout of time in seconds. More precisely,
+    *                the exception is raised when no character have been read
+    *                and the socket was not close while waiting. Default: wait
+    *                forever. *)
   val read :
         ?recursive:bool -> ?init:string -> ?on_error:(string*failure -> unit) ->
-        priority:'a -> 'a scheduler -> Unix.file_descr -> 
+        ?timeout:float -> priority:'a -> 'a scheduler -> Unix.file_descr -> 
         marker -> (string*(string option) -> unit) -> unit
 
   (** Similar to [read] but less complex.
@@ -199,10 +208,15 @@ sig
     * @param exec function to execute after writing, default: [fun () -> ()] 
     * @param on_error function to execute when an error occured, default: [fun _ -> ()] 
     * @param string write data from this string 
-    * @param bigarray write data from this bigarray, if no [string] is given *)
+    * @param bigarray write data from this bigarray, if no [string] is given 
+    * @param timeout Terminate with [Timeout] failure if nothing has been written
+    *                after the given amout of time in seconds. More precisely,
+    *                the exception is raised when no character have been written
+    *                and the socket was not close while waiting. Default: wait
+    *                forever. *)
   val write :
         ?exec:(unit -> unit) -> ?on_error:(failure -> unit) -> 
-        ?bigarray:bigarray -> ?string:string -> priority:'a -> 
+        ?bigarray:bigarray -> ?string:string -> ?timeout:float -> priority:'a -> 
         'a scheduler -> Unix.file_descr -> unit
 end
 
@@ -402,34 +416,42 @@ sig
 
     (** {2 Read/write } *)
 
-    (** [read ~priority ~marker h] creates a 
+    (** [read ?timeout ~priority ~marker h] creates a 
       * computation that reads from [h.socket]
       * and returns the first string split 
       * according to [marker]. This function
       * can be used to create a computation that
-      * reads data from a socket. *)
-    val read : priority:'a -> marker:Io.marker -> 
-               ('a,'b) handler -> (string,'b) t
+      * reads data from a socket. [timeout] parameter
+      * forces the computation to return an error if
+      * nothing has been read for more than [timeout] 
+      * seconds. Default: wait forever. *)
+    val read : ?timeout:float -> priority:'a -> 
+               marker:Io.marker -> ('a,'b) handler -> 
+               (string,'b) t
 
-    (** [read_all ~priority s sock] creates a 
+    (** [read_all ?timeout ~priority s sock] creates a 
       * computation that reads all data from [sock]
       * and returns it. Raised value contains data
       * read before an error occured. *)
-    val read_all : priority:'a -> 
+    val read_all : ?timeout:float ->
+                   priority:'a -> 
                    'a scheduler -> 
                    Unix.file_descr -> (string,(string*Io.failure)) t
 
-    (** [write ~priority h s] creates a computation
+    (** [write ?timeout ~priority h s] creates a computation
       * that writes string [s] to [h.socket]. This
       * function can be used to create a computation
-      * that sends data to a socket. *)
-    val write : priority:'a -> ('a,'b) handler -> 
+      * that sends data to a socket. [timeout] parameter
+      * forces the computation to return an error if
+      * nothing has been written for more than [timeout] 
+      * seconds. Default: wait forever. *)
+    val write : ?timeout:float -> priority:'a -> ('a,'b) handler -> 
                 string -> (unit,'b) t
 
-    (** [write_bigarray ~priority h ba] creates a computation
+    (** [write_bigarray ?timeout ~priority h ba] creates a computation
       * that writes data from [ba] to [h.socket]. This function
       * can to create a computation that writes data to a socket. *)
-    val write_bigarray : priority:'a -> ('a,'b) handler ->
+    val write_bigarray : ?timeout:float -> priority:'a -> ('a,'b) handler ->
                          Io.bigarray -> (unit,'b) t
   end
 end
