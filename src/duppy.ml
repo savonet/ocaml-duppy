@@ -165,26 +165,28 @@ let process s log =
   in
   (* Poll for an event. *)
   let r,w,x =
-    let timeout = if e.t = infinity then -1. else max 0. (e.t -. (time ())) in
-    log (Printf.sprintf "Enter select at %f, timeout %f (%d/%d/%d)."
-           (time ()) timeout
+    let rec f () = 
+      try
+        let timeout = 
+          if e.t = infinity then -1. else max 0. (e.t -. (time ())) 
+        in
+        log (Printf.sprintf "Enter select at %f, timeout %f (%d/%d/%d)."
+             (time ()) timeout
            (List.length e.r) (List.length e.w) (List.length e.x)) ;
-    let r,w,x =
-      (* [EINTR] means that select was interrupted by 
-       * a signal before any of the selected events 
-       * occurred and before the timeout interval expired.
-       * We catch it and restart.. *)
-      let rec f () = 
-        try
-          Unix.select e.r e.w e.x timeout
-        with
-          | Unix.Unix_error (Unix.EINTR,_,_) -> f ()
-      in
-      f ()
+        let r,w,x = Unix.select e.r e.w e.x timeout in
+        log (Printf.sprintf "Left select at %f (%d/%d/%d)." (time ())
+               (List.length r) (List.length w) (List.length x)) ;
+        r,w,x
+      with
+        | Unix.Unix_error (Unix.EINTR,_,_) ->
+          (* [EINTR] means that select was interrupted by 
+           * a signal before any of the selected events 
+           * occurred and before the timeout interval expired.
+           * We catch it and restart.. *) 
+           log (Printf.sprintf "Select interrupted at %f." (time ())) ;
+           f ()
     in
-      log (Printf.sprintf "Left select at %f (%d/%d/%d)." (time ())
-             (List.length r) (List.length w) (List.length x)) ;
-      r,w,x
+    f ()
   in
   (* Empty the wake_up pipe if needed. *)
   let () =

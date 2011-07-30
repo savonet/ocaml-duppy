@@ -3,6 +3,9 @@
 * Added optional timeout for
   all [Duppy.Io] and [Duppy.Monad.Io] 
   operations.
+* Fixed handling of EINTR: update the 
+  timeout when restarting after being 
+  interrupted.
 
 0.4.0 (26-06-2011)
 =====
