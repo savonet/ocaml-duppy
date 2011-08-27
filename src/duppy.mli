@@ -20,6 +20,8 @@
 
  *****************************************************************************)
 
+  (** Advanced scheduler and monad for server-oriented programming. *)
+
   (**  
     * {R {i {v 
     *        The bars could not hold me;
