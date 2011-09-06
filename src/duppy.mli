@@ -303,29 +303,44 @@ sig
     * the calling computation and not the calling thread. *)
   module Mutex : 
   sig
-    (** Type for a mutex. *)
-    type mutex 
+    (** Information used to initialize a Mutex module. *)
+    module type Mutex_control =
+    sig
+      type priority
+      val scheduler : priority scheduler
+      val priority : priority
+    end
 
-    (** [create ~priority s] creates a mutex. Implementation-wise,
-      * a duppy task is created that will be used to select a 
-      * waiting computation, lock the mutex on it and resume it.
-      * Thus, [priority] and [s] represents, resp., the priority 
-      * and scheduler used when running calling process' computation. *)
-    val create : priority:'a -> 'a scheduler -> mutex
+    module type Mutex_t =
+    sig
+      (** Type for a mutex. *)
+      type mutex
 
-    (** A computation that locks a mutex
-      * and returns [unit] afterwards. Computation
-      * will be blocked until the mutex is sucessfuly locked. *)
-    val lock : mutex -> (unit,'a) t
+      module Control : Mutex_control
 
-    (** A computation that tries to lock a mutex.
-      * Returns immediatly [true] if the mutex was sucesfully locked
-      * or [false] otherwise. *)
-    val try_lock : mutex -> (bool,'a) t
+      (** [create ()] creates a mutex. Implementation-wise,
+        * a duppy task is created that will be used to select a
+        * waiting computation, lock the mutex on it and resume it.
+        * Thus, [priority] and [s] represents, resp., the priority
+        * and scheduler used when running calling process' computation. *)
+      val create : unit -> mutex
 
-    (** A computation that unlocks a mutex. 
-      * Should return immediatly. *)
-    val unlock : mutex -> (unit,'a) t
+      (** A computation that locks a mutex
+        * and returns [unit] afterwards. Computation
+        * will be blocked until the mutex is sucessfuly locked. *)
+      val lock : mutex -> (unit,'a) t
+
+      (** A computation that tries to lock a mutex.
+        * Returns immediatly [true] if the mutex was sucesfully locked
+        * or [false] otherwise. *)
+      val try_lock : mutex -> (bool,'a) t
+
+      (** A computation that unlocks a mutex.
+        * Should return immediatly. *)
+      val unlock : mutex -> (unit,'a) t
+    end
+
+    module Factory(Control : Mutex_control) : Mutex_t 
   end
 
   (** This module implements monadic
@@ -337,34 +352,37 @@ sig
     * been called. *)
   module Condition : 
   sig
-    (** Type of a condition, used in [wait] and [broadcast] *)
-    type condition
+    module Factory(Mutex : Mutex.Mutex_t) :
+    sig
+      (** Type of a condition, used in [wait] and [broadcast] *)
+      type condition
 
-    (** Create a condition. Implementation-wise,
-      * a duppy task is created that will be used to select a
-      * waiting computation, and resume it.
-      * Thus, [priority] and [s] represents, resp., the priority
-      * and scheduler used when running calling process' computation. *)
-    val create : priority:'a -> 'a scheduler -> condition
+      (** Create a condition. Implementation-wise,
+        * a duppy task is created that will be used to select a
+        * waiting computation, and resume it.
+        * Thus, [priority] and [s] represents, resp., the priority
+        * and scheduler used when running calling process' computation. *)
+      val create : unit -> condition
 
-    (** [wait h m] is a computation that:
-      * {ul
-      * {- Unlock mutex [m]}
-      * {- Wait until [Condition.signal c] or [Condition.broadcast c] 
-           has been called}
-      * {- Locks mutex [m]}
-      * {- Returns [unit]}} *)
-    val wait : condition -> Mutex.mutex -> (unit,'b) t
-
-    (** [broadcast c] is a computation that 
-      * resumes all computations waiting on [c]. It should
-      * return immediatly. *)
-    val broadcast : condition -> (unit,'a) t
-
-    (** [signal c] is a computation that resumes one 
-      * computation waiting on [c]. It should return
-      * immediatly. *)
-    val signal : condition -> (unit,'a) t
+      (** [wait h m] is a computation that:
+        * {ul
+        * {- Unlock mutex [m]}
+        * {- Wait until [Condition.signal c] or [Condition.broadcast c] 
+             has been called}
+        * {- Locks mutex [m]}
+        * {- Returns [unit]}} *)
+      val wait : condition -> Mutex.mutex -> (unit,'a) t
+  
+      (** [broadcast c] is a computation that 
+        * resumes all computations waiting on [c]. It should
+        * return immediately. *)
+      val broadcast : condition -> (unit,'a) t
+  
+      (** [signal c] is a computation that resumes one 
+        * computation waiting on [c]. It should return
+        * immediately. *)
+      val signal : condition -> (unit,'a) t
+    end
   end
 
   (** This module implements monadic computations

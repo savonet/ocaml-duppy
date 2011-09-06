@@ -94,38 +94,6 @@
   *
   * }}
   * 
-  * {2 Mutex module }
-  *
-  * {ul
-  * {- [duppy_mutex] is equivalent to [Duppy.Monad.Mutex.create]
-  *
-  * }
-  * {- [duppy_lock] is equivalent to [Duppy.Monad.Mutex.lock]
-  *
-  * }
-  * {- [duppy_try_lock] is equivalent to [Duppy.Monad.Mutex.try_lock]
-  *
-  * }
-  * {- [duppy_unlock] is equivalent to [Duppy.Monad.Mutex.unlock]
-  *
-  * }}
-  *
-  * {2 Condition module }
-  * {ul
-  * {- [duppy_condition] is equivalent to [Duppy.Monad.Condition.create]
-  *
-  * }
-  * {- [duppy_wait] is equivalent to [Duppy.Monad.Condition.wait]
-  *
-  * }
-  * {- [duppy_signal] is equivalent to [Duppy.Monad.Condition.signal]
-  *
-  * }
-  * {- [duppy_broadcast] is equivalent to [Duppy.Monad.Condition.broadcast]
-  *
-  * }}
-  *
-  * 
   * {2 I/O module }
   *
   * {ul

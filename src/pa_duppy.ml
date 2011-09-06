@@ -125,32 +125,8 @@ EXTEND Gram
         | "duppy_iter" ->
              <:expr< Duppy.Monad.iter >>
  
-        | "duppy_wait" ->
-             <:expr< Duppy.Monad.Condition.wait >>
-
-        | "duppy_broadcast" ->
-            <:expr< Duppy.Monad.Condition.broadcast >>
-
-        | "duppy_signal" ->
-            <:expr< Duppy.Monad.Condition.signal >>
-
-        | "duppy_condition" ->
-           <:expr< Duppy.Monad.Condition.create >>
-
-        | "duppy_lock" ->
-             <:expr< Duppy.Monad.Mutex.lock >>
-
-        | "duppy_try_lock" ->
-             <:expr< Duppy.Monad.Mutex.lock >>
-
-        | "duppy_unlock" ->
-            <:expr< Duppy.Monad.Mutex.unlock >>
-
         | "duppy_delay" ->
             <:expr< Duppy.Monad.Io.delay >>
-
-        | "duppy_mutex" ->
-           <:expr< Duppy.Monad.Mutex.create >>
 
         | "duppy_fold_left" ->
              <:expr< Duppy.Monad.fold_left >>

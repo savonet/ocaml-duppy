@@ -1,3 +1,8 @@
+0.4.2 ()
+=====
+* Reimplemented monadic Mutex and Condition.
+* Consume more than one char when waking up Async tasks.
+
 0.4.1 (04-08-2011)
 =====
 * Added optional timeout for
