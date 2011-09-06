@@ -706,7 +706,7 @@ struct
       let cleanup m =
         Mutex_o.lock ctl_m ;
         let q = Queue.create () in
-        Queue.iter (fun m' -> if m = m' then Queue.push m q) mutexes ;
+        Queue.iter (fun m' -> if m <> m' then Queue.push m q) mutexes ;
         Queue.clear mutexes ;
         Queue.transfer q mutexes ;
         Mutex_o.unlock ctl_m

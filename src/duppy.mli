@@ -303,7 +303,10 @@ sig
     * the calling computation and not the calling thread. *)
   module Mutex : 
   sig
-    (** Information used to initialize a Mutex module. *)
+    (** Information used to initialize a Mutex module. 
+      * [priority] and [scheduler] are used to initialize a task
+      * which treat mutexes as well as conditions from the below
+      * [Condition] module. *)
     module type Mutex_control =
     sig
       type priority
@@ -318,11 +321,7 @@ sig
 
       module Control : Mutex_control
 
-      (** [create ()] creates a mutex. Implementation-wise,
-        * a duppy task is created that will be used to select a
-        * waiting computation, lock the mutex on it and resume it.
-        * Thus, [priority] and [s] represents, resp., the priority
-        * and scheduler used when running calling process' computation. *)
+      (** [create ()] creates a mutex. *)
       val create : unit -> mutex
 
       (** A computation that locks a mutex
