@@ -22,6 +22,8 @@
 
 type fd = Unix.file_descr
 
+exception Panic of exn
+
 (** [remove f l] is like [List.find f l] but also returns the result of removing
   * the found element from the original list. *)
 let remove f l =
@@ -62,6 +64,11 @@ type 'a scheduler =
   queues_m : Mutex.t;
   mutable stop : bool;
 }
+
+let clear_tasks s = 
+  Mutex.lock s.tasks_m ;
+  s.tasks <- [] ;
+  Mutex.unlock s.tasks_m 
 
 let create ?(compare=compare) () = 
   let out_pipe,in_pipe = Unix.pipe () in
@@ -185,6 +192,13 @@ let process s log =
            * We catch it and restart.. *) 
            log (Printf.sprintf "Select interrupted at %f." (time ())) ;
            f ()
+        | e -> 
+           (* Uncaught exception: 
+            * 1) Discards all tasks currently in the loop (we do not know which 
+            *    socket caused an error).
+            * 2) Raise (Panic e) *)
+           clear_tasks s ; 
+           raise (Panic e) 
     in
     f ()
   in

@@ -58,6 +58,13 @@
   * ['a] is the type of objects used for priorities. *)
 type 'a scheduler
 
+(** Panic exception is raised when duppy's event loops has
+  * crashed. This exception should be considered a MAJOR
+  * FAILURE. All current non-ready tasks registered for the 
+  * calling scheduler are dropped. You may restart Duppy's queues after it is raised but
+  * it should only be used to terminate the process diligently!! *)
+exception Panic of exn
+
 (** Initiate a new scheduler 
   * @param compare the comparison function used to sort tasks according to priorities. 
   * Works as in [List.sort] *)
@@ -66,6 +73,9 @@ val create : ?compare:('a -> 'a -> int) -> unit -> 'a scheduler
 (** [queue ~log ~priorities s name] 
  * starts a queue, on the scheduler [s] only processing priorities [p]
  * for which [priorities p] returns [true].
+ *
+ * Raises [Panic exception] if [exception] was raised while executing
+ * the main event loop.
  *
  * Several queues can be run concurrently against [s]. 
  * @param log Logging function. Default: [Printf.printf "queue %s: %s\n" name]
