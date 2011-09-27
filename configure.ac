@@ -1,16 +1,12 @@
 
 # check for one particular file of the sources 
-AC_INIT(ocaml-duppy, 0.4.2, savonet-users@lists.sourceforge.net)
+AC_INIT([ocaml-duppy],[0.4.2],[savonet-users@lists.sourceforge.net])
 
 VERSION=$PACKAGE_VERSION
 AC_SUBST(VERSION)
 AC_MSG_RESULT([configuring $PACKAGE_STRING])
 
-AC_CHECK_OCAML_COMPILERS()
-
-AC_PROG_CC()
-AC_CHECK_TOOL([AR],[ar],no)
-AC_SUBST(AR)
+AC_BASE_CHECKS()
 
 AC_CHECK_OCAML_BINDING([pcre],[],[],[1])
 INC="$INC `$OCAMLFIND query pcre`"
