@@ -107,7 +107,10 @@ sig
     handler  : 'b list -> ('a,'b) task list
   }
 
-  (** Type for possible events. *)
+  (** Type for possible events. 
+    *
+    * Please not that currently, under win32, all socket used in ocaml-duppy 
+    * are expected to be in blocking mode only! *)
   type event = [
     | `Delay of float
     | `Write of Unix.file_descr

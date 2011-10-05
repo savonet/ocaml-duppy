@@ -159,6 +159,27 @@ let stop s =
 
 let tmp = String.create 1024
 
+(* There seems to be an issue under win32 where
+ * some sockets are left in non-blocking mode
+ * after Unix.select. Since we do not use non-blocking mode at all
+ * in duppy, this wrapper ensures that all socket are set back to
+ * blocking mode after a call to select under win32.. *)
+let select r w e t =
+  let ret = Unix.select r w e t in
+  if Sys.os_type <> "Win32" then
+    ret
+  else
+   begin
+    let f x =
+       try
+        Unix.clear_nonblock x
+       with _ -> ()
+    in
+    let f = List.iter f in
+    f r; f w; f e;
+    ret
+   end
+
   (** There should be only one call of #process at a time.
     * Process waits for tasks to become ready, and moves ready tasks
     * to the ready queue. *)
@@ -180,7 +201,7 @@ let process s log =
         log (Printf.sprintf "Enter select at %f, timeout %f (%d/%d/%d)."
              (time ()) timeout
            (List.length e.r) (List.length e.w) (List.length e.x)) ;
-        let r,w,x = Unix.select e.r e.w e.x timeout in
+        let r,w,x = select e.r e.w e.x timeout in
         log (Printf.sprintf "Left select at %f (%d/%d/%d)." (time ())
                (List.length r) (List.length w) (List.length x)) ;
         r,w,x
