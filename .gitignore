@@ -6,8 +6,13 @@ config.log
 config.status
 config.sub
 configure
-examples/Makefile.http
-examples/Makefile.telnet
 install-sh
 src/META
 src/Makefile
+src/._bcdi/
+src/._d/
+src/._ncdi/
+src/*.a
+src/*.cm*
+src/*.o
+src/*.so
