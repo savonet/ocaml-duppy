@@ -1,0 +1,13 @@
+Makefile
+aclocal.m4
+autom4te.cache/
+config.guess
+config.log
+config.status
+config.sub
+configure
+examples/Makefile.http
+examples/Makefile.telnet
+install-sh
+src/META
+src/Makefile
