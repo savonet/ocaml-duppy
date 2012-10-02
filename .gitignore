@@ -16,3 +16,5 @@ src/*.a
 src/*.cm*
 src/*.o
 src/*.so
+examples/Makefile.http
+examples/Makefile.telnet
