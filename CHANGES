@@ -1,4 +1,4 @@
-0.4.2 ()
+0.4.2 (08-10-2011)
 =====
 * Reimplemented monadic Mutex and Condition.
 * Consume more than one char when waking up Async tasks.
