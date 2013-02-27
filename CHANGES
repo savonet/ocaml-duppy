@@ -1,3 +1,7 @@
+0.5.0 ()
+=====
+* Remove Panic exception and let original exception bubble through.
+
 0.4.2 (08-10-2011)
 =====
 * Reimplemented monadic Mutex and Condition.

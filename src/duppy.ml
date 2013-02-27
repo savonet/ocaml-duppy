@@ -22,8 +22,6 @@
 
 type fd = Unix.file_descr
 
-exception Panic of exn
-
 (** [remove f l] is like [List.find f l] but also returns the result of removing
   * the found element from the original list. *)
 let remove f l =
@@ -217,9 +215,9 @@ let process s log =
            (* Uncaught exception: 
             * 1) Discards all tasks currently in the loop (we do not know which 
             *    socket caused an error).
-            * 2) Raise (Panic e) *)
+            * 2) Re-Raise e *)
            clear_tasks s ; 
-           raise (Panic e) 
+           raise e 
     in
     f ()
   in
