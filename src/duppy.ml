@@ -105,6 +105,17 @@ struct
   let time () = Unix.gettimeofday ()
   
   let rec t_of_task (task:('a,[<event])task) =
+    (** Test task sockets *)
+    let prepare = function
+      | `Read socket  ->
+          ignore(Unix.select [socket] [] [] 0.)
+      | `Write socket ->
+          ignore(Unix.select [] [socket] [] 0.)
+      | `Exception socket ->
+          ignore(Unix.select [] [] [socket] 0.)
+      | `Delay  _ -> ()
+    in
+    List.iter prepare task.events;
     let t0 = time () in
       { timestamp = t0 ; prio = task.priority ;
         enrich = (fun e ->
