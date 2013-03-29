@@ -105,7 +105,16 @@ struct
   let time () = Unix.gettimeofday ()
   
   let rec t_of_task (task:('a,[<event])task) =
-    (** Test task sockets *)
+    (** Test task sockets. There's no easy way to test
+      * sockets passed to [select] before hand for potential
+      * exception raised there. Once [select] raises an
+      * exception with multiple sockets passed, it is impossible
+      * to know which socket caused that exception, leading to
+      * fatal errors. Thus, we test each socket individually here
+      * using a [select] to stick to actual conditions. Please
+      * note there there is still a chance that the socket is closed
+      * between this test and the time it is actually pushed down 
+      * to the main [select] call. *)
     let prepare = function
       | `Read socket  ->
           ignore(Unix.select [socket] [] [] 0.)
