@@ -112,7 +112,7 @@ struct
       * to know which socket caused that exception, leading to
       * fatal errors. Thus, we test each socket individually here
       * using a [select] to stick to actual conditions. Please
-      * note there there is still a chance that the socket is closed
+      * note that there is still a chance that the socket is closed
       * between this test and the time it is actually pushed down 
       * to the main [select] call. *)
     let prepare = function
