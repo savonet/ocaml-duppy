@@ -2,8 +2,6 @@
 =====
 * Remove Panic exception and let original exception bubble through.
 * Removed win32 select work-around: patch applied upstream.
-* Added dummy [select] calls before submitting a task to try to 
-  protect against exceptions when calling actual [select]
 
 0.4.2 (08-10-2011)
 =====
