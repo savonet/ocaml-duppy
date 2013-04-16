@@ -1,4 +1,4 @@
-0.5.0 ()
+0.5.0 (04-03-2013)
 =====
 * Remove Panic exception and let original exception bubble through.
 * Removed win32 select work-around: patch applied upstream.
@@ -11,15 +11,15 @@
 0.4.1 (04-08-2011)
 =====
 * Added optional timeout for
-  all [Duppy.Io] and [Duppy.Monad.Io] 
+  all [Duppy.Io] and [Duppy.Monad.Io]
   operations.
-* Fixed handling of EINTR: update the 
-  timeout when restarting after being 
+* Fixed handling of EINTR: update the
+  timeout when restarting after being
   interrupted.
 
 0.4.0 (26-06-2011)
 =====
-* Added a monad API to write 
+* Added a monad API to write
   server code.
 * Close both sides of the pipe
   in Duppy.Async
@@ -29,19 +29,19 @@
 
 0.3.2 (19-08-2010)
 =====
-* Switch from Thread.select to 
-  Unix.select. They are the same on 
+* Switch from Thread.select to
+  Unix.select. They are the same on
   POSIX and only Unix.select is available
   on Win32..
 * Do not use assertions on Mutex.try_lock
   on Win32: on this plateform, a thread can
-  double-lock a mutex, making the assertion 
+  double-lock a mutex, making the assertion
   inconsistent.
 
 0.3.1 (14-10-2009)
 =====
-* Really catch raised exception on Duppy.Io 
-  operations: catching was missing on recurrent 
+* Really catch raised exception on Duppy.Io
+  operations: catching was missing on recurrent
   calls.
 
 0.3.0 (18-06-2009)
@@ -70,6 +70,6 @@
 * Fixed typos in the documentation, added some details
 * Installs .cmx file
 
-0.1.0 (07-03-2008) 
+0.1.0 (07-03-2008)
 =====
 * Initial release
