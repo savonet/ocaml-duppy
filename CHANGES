@@ -1,4 +1,4 @@
-0.5.1 ()
+0.5.1 (05-08-2013)
 =====
 * Removed win32 select work-around: patch applied upstream.
 
