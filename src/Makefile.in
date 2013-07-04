@@ -40,6 +40,7 @@ INCDIRS = @INC@
 NO_CUSTOM = yes
 OCAMLFLAGS = @OCAMLFLAGS@
 TRASH = pa_duppy.cmo pa_duppy.cmi
+ANNOTATE = true
 
 all: @PA_DUPPY@ $(OCAMLBEST)
 
