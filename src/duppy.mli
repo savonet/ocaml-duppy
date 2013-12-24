@@ -326,7 +326,7 @@ sig
     module type Mutex_t =
     sig
       (** Type for a mutex. *)
-      type mutex
+      type mutex = Mutex.t
 
       module Control : Mutex_control
 

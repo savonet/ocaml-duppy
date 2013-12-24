@@ -20,76 +20,15 @@
 
  *****************************************************************************)
 
-type fd = Unix.file_descr
+type 'a scheduler = Mutex.t * Thread.t list ref
 
-(** [remove f l] is like [List.find f l] but also returns the result of removing
-  * the found element from the original list. *)
-let remove f l =
-  let rec aux acc = function
-    | [] -> raise Not_found
-    | x::l -> if f x then x, List.rev_append acc l else aux (x::acc) l
-  in
-    aux [] l
-
-(** Events and tasks from the implementation point-of-view:
-  * we have to hide the 'a parameter. *)
-
-type e = {
-  r : fd list ;
-  w : fd list ;
-  x : fd list ;
-  t : float
-}
-
-type 'a t = {
-  timestamp : float ;
-  prio : 'a ;
-  enrich   : e -> e ;
-  is_ready : e -> (unit -> 'a t list) option
-}
-
-type 'a scheduler =
-{
-  out_pipe : Unix.file_descr;
-  in_pipe : Unix.file_descr;
-  compare : 'a -> 'a -> int;
-  select_m : Mutex.t;
-  mutable tasks : 'a t list;
-  tasks_m : Mutex.t;
-  mutable ready : ('a * (unit -> 'a t list)) list;
-  ready_m : Mutex.t;
-  mutable queues : Condition.t list;
-  queues_m : Mutex.t;
-  mutable stop : bool;
-}
-
-let clear_tasks s = 
-  Mutex.lock s.tasks_m ;
-  s.tasks <- [] ;
-  Mutex.unlock s.tasks_m 
-
-let create ?(compare=compare) () = 
-  let out_pipe,in_pipe = Unix.pipe () in
-  {
-    out_pipe = out_pipe;
-    in_pipe = in_pipe;
-    compare = compare;
-    select_m = Mutex.create ();
-    tasks = [];
-    tasks_m = Mutex.create ();
-    ready = [];
-    ready_m = Mutex.create ();
-    queues = [];
-    queues_m = Mutex.create ();
-    stop = false;
-  }
-
-let wake_up s = ignore (Unix.write s.in_pipe "x" 0 1)
+let create ?(compare=compare) () : 'a scheduler = Mutex.create (), ref []
 
 module Task = 
 struct
+  type fd = Unix.file_descr
+
   (** Events and tasks from the user's point-of-view. *)
-  
   type event = [
     | `Delay     of float
     | `Write     of fd
@@ -102,216 +41,54 @@ struct
     events   : 'b list ;
     handler  : 'b list -> ('a,'b) task list
   }
-  let time () = Unix.gettimeofday ()
-  
-  let rec t_of_task (task:('a,[<event])task) =
-    let t0 = time () in
-      { timestamp = t0 ; prio = task.priority ;
-        enrich = (fun e ->
-                    List.fold_left
-                      (fun e -> function
-                         | `Delay     s -> { e with t = min e.t (t0+.s) }
-                         | `Read      s -> { e with r = s::e.r }
-                         | `Write     s -> { e with w = s::e.w }
-                         | `Exception s -> { e with x = s::e.x })
-                      e task.events) ;
-        is_ready = (fun e ->
-                      let l =
-                        List.filter
-                          (fun evt ->
-                             match (evt :> event) with
-                               | `Delay     s when time () > t0+.s -> true
-                               | `Read      s when List.mem s e.r -> true
-                               | `Write     s when List.mem s e.w -> true
-                               | `Exception s when List.mem s e.x -> true
-                               | _ -> false)
-                          task.events
-                      in
-                        if l = [] then None else
-                          Some (fun () -> List.map t_of_task (task.handler l)))
-      }
-  
-  let add_t s items =
-    let f item = 
-      match item.is_ready {r=[];w=[];x=[];t=0.} with
-        | Some f -> 
-            Mutex.lock s.ready_m ;
-            s.ready <- (item.prio,f) :: s.ready ;
-            Mutex.unlock s.ready_m
-        | None ->
-            Mutex.lock s.tasks_m ;
-            s.tasks <- item :: s.tasks ;
-            Mutex.unlock s.tasks_m ;
+
+  let rec add (s : 'a scheduler) (t : ('a,[<event] as 'b) task) =
+    let read = ref [] in
+    let write = ref [] in
+    let exc = ref [] in
+    let timeout = ref (-1.) in
+    List.iter (function
+    | `Read fd -> read := fd :: !read
+    | `Write fd -> write := fd :: !write
+    | `Exception fd -> exc := fd :: !exc
+    | `Delay d -> if !timeout < 0. then timeout := d else timeout := min !timeout d
+    ) t.events;
+    let m, threads = s in
+    Mutex.lock m;
+    let thread = Thread.create
+      (fun () ->
+        let read, write, exc = Unix.select !read !write !exc !timeout in
+        let events =
+          List.filter (function
+          | `Read fd -> List.mem fd read
+          | `Write fd -> List.mem fd write
+          | `Exception fd -> List.mem fd exc
+          | `Delay _ -> false
+          ) t.events
+        in
+        let tt = t.handler events in
+        List.iter (add s) tt;
+        Mutex.lock m;
+        let self = Thread.self () in
+        threads := List.filter (fun t -> t <> self) !threads;
+        Mutex.unlock m
+      ) ()
     in
-    List.iter f items ;
-    wake_up s
-  
-  let add s t  = add_t s [t_of_task t]
+    threads := thread :: !threads;
+    Mutex.unlock m
 end
 
 open Task
 
-let stop s = 
-  s.stop <- true ;
-  wake_up s
+let queue ?log ?priorities s name =
+  ()
 
-let tmp = String.create 1024
-
-(** There should be only one call of #process at a time.
-  * Process waits for tasks to become ready, and moves ready tasks
-  * to the ready queue. *)
-let process s log = 
-  (* Compute the union of all events. *)
-  let e =
-    List.fold_left
-      (fun e t -> t.enrich e)
-      { r = [s.out_pipe] ; w = [] ; x = [] ; t = infinity }
-      s.tasks
-  in
-  (* Poll for an event. *)
-  let r,w,x =
-    let rec f () = 
-      try
-        let timeout = 
-          if e.t = infinity then -1. else max 0. (e.t -. (time ())) 
-        in
-        log (Printf.sprintf "Enter select at %f, timeout %f (%d/%d/%d)."
-             (time ()) timeout
-           (List.length e.r) (List.length e.w) (List.length e.x)) ;
-        let r,w,x = Unix.select e.r e.w e.x timeout in
-        log (Printf.sprintf "Left select at %f (%d/%d/%d)." (time ())
-               (List.length r) (List.length w) (List.length x)) ;
-        r,w,x
-      with
-        | Unix.Unix_error (Unix.EINTR,_,_) ->
-          (* [EINTR] means that select was interrupted by 
-           * a signal before any of the selected events 
-           * occurred and before the timeout interval expired.
-           * We catch it and restart.. *) 
-           log (Printf.sprintf "Select interrupted at %f." (time ())) ;
-           f ()
-        | e -> 
-           (* Uncaught exception: 
-            * 1) Discards all tasks currently in the loop (we do not know which 
-            *    socket caused an error).
-            * 2) Re-Raise e *)
-           clear_tasks s ; 
-           raise e 
-    in
-    f ()
-  in
-  (* Empty the wake_up pipe if needed. *)
-  let () =
-    if List.mem s.out_pipe r then
-      (* For safety, we may absorb more than
-       * one write. This avoids bad situation
-       * when exceesive wake_up may fill up the
-       * pipe's write buffer, causing a wake_up 
-       * to become blocking..  *)
-      ignore (Unix.read s.out_pipe tmp 0 1024)
-  in
-  (* Move ready tasks to the ready list. *)
-  let e = { r=r ; w=w ; x=x ; t=0. } in
-    Mutex.lock s.tasks_m ;
-    (* Split [tasks] into [r]eady and still [w]aiting. *)
-    let r,w =
-      List.fold_left
-        (fun (r,w) t ->
-           match t.is_ready e with
-             | Some f -> (t.prio,f)::r, w
-             | None -> r, t::w)
-        ([],[])
-        s.tasks
-    in
-      s.tasks <- w ;
-      Mutex.unlock s.tasks_m ;
-      Mutex.lock s.ready_m ;
-      s.ready <- List.stable_sort (fun (p,_) (p',_) -> s.compare p p') (s.ready @ r) ;
-      Mutex.unlock s.ready_m
-
-  (** Code for a queue to process ready tasks.
-    * Returns true a task was found (and hence processed).
-    *
-    * s.ready_m *must* be locked before calling
-    * this function, and is freed *only* 
-    * if some task was processed. *) 
-let exec s (priorities:'a->bool) =
-  (* This assertion does not work on
-   * win32 because a thread can double-lock
-   * the same mutex.. *)
-  if Sys.os_type <> "Win32" then
-    assert(not (Mutex.try_lock s.ready_m)) ;
-  try
-    let (_,task),remaining =
-      remove
-        (fun (p,f) ->
-           priorities p)
-        s.ready
-    in
-      s.ready <- remaining ;
-      Mutex.unlock s.ready_m ;
-      add_t s (task ()) ;
-      true
-  with Not_found -> false
-
- (** Main loop for queues. *)
-let queue ?log ?(priorities=fun _ -> true) s name = 
-  let log = 
-    match log with
-      | Some e -> e
-      | None -> Printf.printf "queue %s: %s\n" name
-  in
-  let c =
-    let c = Condition.create () in
-      Mutex.lock s.queues_m ;
-      s.queues <- c::s.queues ;
-      Mutex.unlock s.queues_m ;
-      log (Printf.sprintf "Queue #%d starting..." (List.length s.queues)) ;
-      c
-  in
-    (* Try to process ready tasks, otherwise try to become the master,
-     * or be a slave and wait for the master to get some more ready tasks. *)
-    while not s.stop do
-      (* Lock the ready tasks until the queue has a task to proceed,
-       * *or* is really ready to restart on its condition, see the 
-       * Condition.wait call below for the atomic unlock and wait. *)
-      Mutex.lock s.ready_m ;
-      log (Printf.sprintf "There are %d ready tasks." (List.length s.ready)) ;
-      if exec s priorities then () else 
-          let wake () = 
-            (* Wake up other queues 
-	     * if there are remaining tasks *)
-            if s.ready <> [] then begin
-	        Mutex.lock s.queues_m ;
-                List.iter (fun x -> if x <> c then Condition.signal x) 
-		          s.queues ;
-	        Mutex.unlock s.queues_m 
-	      end ;
-          in
-          if Mutex.try_lock s.select_m then begin
-	    (* Processing finished for me
-	     * I can unlock ready_m now.. *)
-	    Mutex.unlock s.ready_m ;
-            process s log ;
-            Mutex.unlock s.select_m ;
-	    Mutex.lock s.ready_m ;
-            wake () ;
-	    Mutex.unlock s.ready_m
-          end else begin
-              (* We use s.ready_m mutex here.
-	       * Hence, we avoid race conditions
-	       * with any other queue being processing
-	       * a task that would create a new task: 
-	       * without this mutex, the new task may not be 
-	       * notified to this queue if it is going to sleep
-	       * in concurrency..
-	       * It also avoid race conditions when restarting 
-	       * queues since s.ready_m is locked until all 
-	       * queues have been signaled. *)
-              Condition.wait c s.ready_m;
-              Mutex.unlock s.ready_m
-            end
-    done
+let stop s =
+  let m, threads = s in
+  Mutex.lock m;
+  List.iter Thread.kill !threads;
+  threads := [];
+  Mutex.unlock m
 
 module Async =
 struct
@@ -596,7 +373,7 @@ struct
       raise:  'b -> unit }
   type ('a,'b) t  = ('a,'b) handler -> unit
 
-  let return x = 
+  let return (x:'a) : ('a,'b) t =
     fun h -> h.return x 
 
   let raise x = 
@@ -652,7 +429,7 @@ struct
     module type Mutex_t =
     sig
       (** Type for a mutex. *)
-      type mutex
+      type mutex = Mutex.t
 
       module Control : Mutex_control
 
@@ -680,207 +457,36 @@ struct
 
     module Factory(Control:Mutex_control) = 
     struct
-      (* A mutex is either locked or not
-       * and has a list of tasks waiting to get
-       * it. *)
-      type mutex =
-        { mutable locked : bool ;
-          mutable tasks  : ((unit->unit) list) }
-
       module Control = Control
 
-      let tmp = String.create 1024
-
-      let (x,y) = Unix.pipe ()
-      
-      let stop = ref false
-      
-      let wake_up () = ignore(Unix.write y " " 0 1)
-      
-      let ctl_m = Mutex_o.create ()
+      type mutex = Mutex.t
      
-      let finalise _ = 
-        stop := true ;
-        wake_up ()
- 
-      let mutexes = Queue.create ()
-
-      let () = Gc.finalise finalise mutexes
-     
-      let register () = 
-        let m = 
-          { locked = false ;
-            tasks = [] } 
-        in
-        Queue.push m mutexes;
-        m
-
-      let cleanup m =
-        Mutex_o.lock ctl_m ;
-        let q = Queue.create () in
-        Queue.iter (fun m' -> if m <> m' then Queue.push m q) mutexes ;
-        Queue.clear mutexes ;
-        Queue.transfer q mutexes ;
-        Mutex_o.unlock ctl_m
+      let create () = Mutex.create ()
       
-      let task f =
-         { Task.
-           priority = Control.priority ;
-           events = [`Delay 0.];
-           handler = (fun _ -> f (); [])}
+      let lock m = return (Mutex.lock m)
       
-      (* This should only be called when [ctl_m] is locked. *)
-      let process_mutex tasks m =
-        if not m.locked then
-          (* I don't think shuffling tasks
-           * matters here.. *)
-          match m.tasks with
-            | x :: l ->
-               m.tasks <- l ;
-               m.locked <- true ;
-               task x :: tasks
-            | _ -> tasks
-        else tasks
+      let try_lock m = return (Mutex.try_lock m)
       
-      let rec handler _ = 
-         Mutex_o.lock ctl_m ;
-         if not !stop then 
-          begin
-           let tasks = 
-             Queue.fold process_mutex [] mutexes
-           in
-           Mutex_o.unlock ctl_m ;
-           ignore(Unix.read x tmp 0 1024) ;
-            { Task.
-               priority = Control.priority ;
-               events   = [`Read x];
-               handler  = handler }  :: tasks
-          end
-         else
-          begin
-           Mutex_o.unlock ctl_m ;
-           try
-             Unix.close x;
-             Unix.close y;
-             []
-           with
-             | _ -> 
-                []
-          end
-      
-      let () = 
-        Task.add Control.scheduler
-         { Task.
-            priority = Control.priority;
-            events   = [`Read x];
-            handler  = handler } 
-     
-      let create () = 
-        Mutex_o.lock ctl_m ;
-        let ret = register () in
-        Mutex_o.unlock ctl_m ;
-        Gc.finalise cleanup ret ;
-        ret
-      
-      let lock m =
-        (fun h' ->
-          Mutex_o.lock ctl_m ;
-          if not m.locked then
-           begin
-            m.locked <- true ;
-            Mutex_o.unlock ctl_m ;
-            h'.return ()
-           end
-          else
-           begin
-            m.tasks <- h'.return :: m.tasks ;
-            Mutex_o.unlock ctl_m
-           end)
-      
-      let try_lock m = 
-        (fun h' ->
-           Mutex_o.lock ctl_m ;
-           if not m.locked then
-            begin
-             m.locked <- true ;
-             Mutex_o.unlock ctl_m ;
-             h'.return true ;
-            end
-           else
-            begin
-             Mutex_o.unlock ctl_m ;
-             h'.return false
-            end)
-      
-      let unlock m =
-        (fun h' -> 
-          Mutex_o.lock ctl_m ;
-          (* Here we allow inter-thread 
-           * and double unlock.. Double unlock
-           * is not necessarily a problem and
-           * inter-thread unlock well.. what is
-           * a thread here ?? :-) *)
-          m.locked <- false ;
-          let wake = m.tasks <> [] in
-          Mutex_o.unlock ctl_m ;
-          if wake then wake_up ();
-          h'.return ())
+      let unlock m = return (Mutex.unlock m)
     end
   end
   module Condition = 
   struct
     module Factory(Mutex : Mutex.Mutex_t) = 
     struct
-      type condition = 
-        { condition_m : Mutex_o.t ;
-          waiting     : (unit -> unit) Queue.t }
+      type condition = Condition.t
 
       module Control = Mutex.Control
 
-      let create () = 
-        { condition_m = Mutex_o.create ();
-          waiting = Queue.create () }
+      let create () = Condition.create ()
 
       (* Mutex.unlock m needs to happen _after_
        * the task has been registered. *)
-      let wait c m = 
-        (fun h ->
-          let proc = 
-            fun () -> Mutex.lock m h
-          in
-          Mutex_o.lock c.condition_m ;
-          Queue.push proc c.waiting;
-          Mutex_o.unlock c.condition_m ;
-          (* Mutex.unlock does not raise exceptions (for now..) *)
-          let h' = { return = (fun () -> ());
-                     raise  = (fun _ -> assert false) }
-          in
-          Mutex.unlock m h') 
+      let wait c m = return (Condition.wait c m)
 
-      let wake_up h = 
-        let handler _ = h (); [] in
-        Task.add Control.scheduler
-         { Task.
-            priority = Control.priority;
-            events   = [`Delay 0.];
-            handler  = handler }
+      let signal c = return (Condition.signal c)
 
-      let signal c = 
-        (fun h ->
-          Mutex_o.lock c.condition_m;
-          let h' = Queue.pop c.waiting in
-          Mutex_o.unlock c.condition_m;
-          wake_up h';
-          h.return ())
-
-      let broadcast c =
-        (fun h ->
-          let q = Queue.create () in
-          Mutex_o.lock c.condition_m;
-          Queue.transfer c.waiting q;
-          Mutex_o.unlock c.condition_m;
-          Queue.iter wake_up q;
-          h.return ())
+      let broadcast c = return (Condition.broadcast c)
     end
   end
 
