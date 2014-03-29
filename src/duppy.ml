@@ -244,7 +244,7 @@ let exec s (priorities:'a->bool) =
   try
     let (_,task),remaining =
       remove
-        (fun (p,f) ->
+        (fun (p,_) ->
            priorities p)
         s.ready
     in
@@ -497,7 +497,7 @@ struct
         | Some x ->
             begin
               match x with
-                | s,Some s' when recursive ->
+                | s,Some _ when recursive ->
                      exec (s,None) ;
                      [{ priority = priority ; 
                         events = events ;
@@ -892,7 +892,7 @@ struct
         mutable data : string ;
         on_error     : Io.failure -> 'b }
  
-    let rec exec ?(delay=0.) ~priority h f = 
+    let exec ?(delay=0.) ~priority h f = 
       (fun h' -> 
         let handler _ =
           begin
