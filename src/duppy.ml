@@ -155,7 +155,7 @@ let stop s =
   s.stop <- true ;
   wake_up s
 
-let tmp = String.create 1024
+let tmp = Bytes.create 1024
 
 (** There should be only one call of #process at a time.
   * Process waits for tasks to become ready, and moves ready tasks
@@ -331,7 +331,7 @@ struct
    (* A pipe to wake up the task *)
    let out_pipe,in_pipe = Unix.pipe () in
    let stop = ref false in
-   let tmp = String.create 1024 in
+   let tmp = Bytes.create 1024 in
    let rec task l =
       if List.exists ((=) (`Read out_pipe)) l then
         (* Consume data from the pipe *)
@@ -689,7 +689,7 @@ struct
 
       module Control = Control
 
-      let tmp = String.create 1024
+      let tmp = Bytes.create 1024
 
       let (x,y) = Unix.pipe ()
       

@@ -9,6 +9,9 @@ AC_BASE_CHECKS()
 AC_CHECK_OCAML_BINDING([pcre],[],[],[1])
 INC="$INC `$OCAMLFIND query pcre`"
 
+AC_CHECK_OCAML_BINDING([bytes],[],[],[1])
+INC="$INC `$OCAMLFIND query bytes`"
+
 if test "$CAMLP4O" != "no" ; then
   PA_DUPPY="pa_duppy.cmo"
   PA_DOC="pa_duppy.mli"
