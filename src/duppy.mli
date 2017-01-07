@@ -153,6 +153,17 @@ sig
   val stop : t -> unit
 end
 
+(** Module type for Io functor. *)
+module type Transport_t =
+sig
+  type t
+  type bigarray = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+  val sock     : t -> Unix.file_descr
+  val read     : t -> Bytes.t -> int -> int -> int
+  val write    : t -> Bytes.t -> int -> int -> int
+  val ba_write : t -> bigarray -> int -> int -> int
+end
+
 (** Easy parsing of [Unix.file_descr].
   *
   * With {!Duppy.Io.read}, you can pass a file descriptor to the scheduler,
@@ -161,8 +172,10 @@ end
   *
   * With {!Duppy.Io.write}, the schdeduler will try to write recursively to the file descriptor
   * the given string. *)
-module Io :
+module type Io_t =
 sig
+
+  type socket
 
   (** Type for markers.
     *
@@ -209,12 +222,12 @@ sig
     *                forever. *)
   val read :
         ?recursive:bool -> ?init:string -> ?on_error:(string*failure -> unit) ->
-        ?timeout:float -> priority:'a -> 'a scheduler -> Unix.file_descr -> 
+        ?timeout:float -> priority:'a -> 'a scheduler -> socket -> 
         marker -> (string*(string option) -> unit) -> unit
 
   (** Similar to [read] but less complex.
     * [write ?exec ?on_error ?string ?bigarray ~priority scheduler socket] 
-    * write data from [string], or from [bigarray] is no string is given, 
+    * write data from [string], or from [bigarray] if no string is given, 
     * to [socket], and executes [exec] or [on_error] if errors occured.
     * @param exec function to execute after writing, default: [fun () -> ()] 
     * @param on_error function to execute when an error occured, default: [fun _ -> ()] 
@@ -228,8 +241,12 @@ sig
   val write :
         ?exec:(unit -> unit) -> ?on_error:(failure -> unit) -> 
         ?bigarray:bigarray -> ?string:string -> ?timeout:float -> priority:'a -> 
-        'a scheduler -> Unix.file_descr -> unit
+        'a scheduler -> socket -> unit
 end
+
+module MakeIo : functor (Transport : Transport_t) -> Io_t with type socket = Transport.t
+
+module Io : Io_t with type socket = Unix.file_descr
 
 (** Monadic interface to {!Duppy.Io}. 
   * 
@@ -398,8 +415,11 @@ sig
     * computations that read or write from a socket,
     * and also to redirect a computation in a different
     * queue with a new priority. *)
-  module Io : 
+  module type Monad_io_t =
   sig
+    type socket
+
+    module Io : Io_t with type socket = socket
 
     (** {2 Type } *)
 
@@ -417,7 +437,7 @@ sig
       * error. *) 
     type ('a,'b) handler =
       { scheduler    : 'a scheduler ;
-        socket       : Unix.file_descr ;
+        socket       : Io.socket ;
         mutable data : string ;
         on_error     : Io.failure -> 'b }
 
@@ -464,7 +484,7 @@ sig
     val read_all : ?timeout:float ->
                    priority:'a -> 
                    'a scheduler -> 
-                   Unix.file_descr -> (string,(string*Io.failure)) t
+                   Io.socket -> (string,(string*Io.failure)) t
 
     (** [write ?timeout ~priority h s] creates a computation
       * that writes string [s] to [h.socket]. This
@@ -482,6 +502,10 @@ sig
     val write_bigarray : ?timeout:float -> priority:'a -> ('a,'b) handler ->
                          Io.bigarray -> (unit,'b) t
   end
+
+  module MakeIo : functor (Io:Io_t) -> Monad_io_t with type socket = Io.socket and module Io = Io
+
+  module Io : Monad_io_t with type socket = Unix.file_descr and module Io = Io
 end
 
   (** {2 Some culture..}

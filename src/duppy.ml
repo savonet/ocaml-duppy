@@ -400,8 +400,49 @@ struct
       | e -> Mutex.unlock t.m; raise e
 end
 
-module Io = 
+module type Transport_t =
+sig
+  type t
+  type bigarray = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+  val sock     : t -> Unix.file_descr
+  val read     : t -> Bytes.t -> int -> int -> int
+  val write    : t -> Bytes.t -> int -> int -> int
+  val ba_write : t -> bigarray -> int -> int -> int
+end
+
+module Unix_transport : Transport_t with type t = Unix.file_descr =
 struct
+  type t = Unix.file_descr
+  type bigarray = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+  let sock s = s
+  let read = Unix.read
+  let write = Unix.write
+  external ba_write : t -> bigarray -> int -> int -> int = "ocaml_duppy_write_ba"
+end
+
+module type Io_t =
+sig
+  type socket
+  type marker = Length of int | Split of string
+  type bigarray = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+  type failure =
+    | Io_error
+    | Unix of Unix.error*string*string
+    | Unknown of exn
+    | Timeout
+  val read :
+        ?recursive:bool -> ?init:string -> ?on_error:(string*failure -> unit) ->
+        ?timeout:float -> priority:'a -> 'a scheduler -> socket ->
+        marker -> (string*(string option) -> unit) -> unit
+  val write :
+        ?exec:(unit -> unit) -> ?on_error:(failure -> unit) ->
+        ?bigarray:bigarray -> ?string:string -> ?timeout:float -> priority:'a ->
+        'a scheduler -> socket -> unit
+end
+
+module MakeIo(Transport:Transport_t) : Io_t with type socket = Transport.t = 
+struct
+  type socket = Transport.t
   type marker = Length of int | Split of string
   type failure = 
     | Io_error 
@@ -414,8 +455,6 @@ struct
 
   type bigarray = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
 
-  external ba_write : Unix.file_descr -> bigarray -> int -> int -> int = "ocaml_duppy_write_ba"
-
   let read ?(recursive=false) ?(init="") ?(on_error=fun _ -> ())
            ?timeout ~priority (scheduler:'a scheduler) 
            socket marker exec = 
@@ -423,18 +462,19 @@ struct
     let b = Buffer.create length in
     let buf = String.make length ' ' in
     Buffer.add_string b init ;
+    let unix_socket = Transport.sock socket in
     let events,check_timeout = 
       match timeout with
-        | None -> [`Read socket], fun _ -> false
-        | Some f -> [`Read socket; `Delay f],
+        | None -> [`Read unix_socket], fun _ -> false
+        | Some f -> [`Read unix_socket; `Delay f],
                     (List.mem (`Delay f))
     in
     let rec f l =
       if check_timeout l then
         raise Timeout_exc ;
-      if (List.mem (`Read socket) l) then
+      if (List.mem (`Read unix_socket) l) then
        begin
-        let input = Unix.read socket buf 0 length in
+        let input = Transport.read socket buf 0 length in
         if input<=0 then raise Io ;
         Buffer.add_substring b buf 0 input
        end ;
@@ -527,7 +567,7 @@ struct
       let task = 
        {
          priority = priority ;
-         events = [`Delay 0.; `Read socket] ;
+         events = [`Delay 0.; `Read unix_socket] ;
          handler  = f
        }
        in
@@ -540,31 +580,32 @@ struct
       match string,bigarray with
         | Some s,_ -> 
             String.length s,
-            Unix.write socket s
+            Transport.write socket s
         | None,Some b ->
             Bigarray.Array1.dim b,
-            ba_write socket b
+            Transport.ba_write socket b
         | _ ->
             0,fun _ _ -> 0
     in
+    let unix_socket = Transport.sock (socket:Transport.t) in
     let events,check_timeout =
       match timeout with
-        | None -> [`Write socket], fun _ -> false
-        | Some f -> [`Write socket; `Delay f],
+        | None -> [`Write unix_socket], fun _ -> false
+        | Some f -> [`Write unix_socket; `Delay f],
                     (List.mem (`Delay f))
     in
     let rec f pos l =
      try
       if check_timeout l then
        raise Timeout_exc ;
-      assert (List.exists ((=) (`Write socket)) l) ;
+      assert (List.exists ((=) (`Write unix_socket)) l) ;
       let len = length - pos in
       let n = write pos len in
       if n<=0 then (on_error Io_error ; [])
       else
       begin
         if n < len then
-          [{ priority = priority ; events = [`Write socket] ;
+          [{ priority = priority ; events = [`Write unix_socket] ;
              handler = f (pos+n) }]
         else
           (exec () ; [])
@@ -587,8 +628,9 @@ struct
         exec ()
 end
 
-(** A monad for implicit
-  * continuations or responses *)
+module Io : Io_t with type socket = Unix.file_descr = MakeIo(Unix_transport)
+
+(** A monad for implicit continuations or responses *)
 module Monad = 
 struct
   type ('a,'b) handler = 
@@ -884,14 +926,41 @@ struct
     end
   end
 
-  module Io =
-  struct
-    type ('a,'b) handler = 
+  module type Monad_io_t =
+  sig
+    type socket
+    module Io : Io_t with type socket = socket
+    type ('a,'b) handler =
       { scheduler    : 'a scheduler ;
-        socket       : Unix.file_descr ;
+        socket       : Io.socket ;
         mutable data : string ;
         on_error     : Io.failure -> 'b }
- 
+    val exec : ?delay:float -> priority:'a -> ('a,'b) handler ->
+               ('c,'b) t -> ('c,'b) t
+    val delay : priority:'a -> ('a,'b) handler -> float -> (unit,'b) t
+    val read : ?timeout:float -> priority:'a ->
+               marker:Io.marker -> ('a,'b) handler ->
+               (string,'b) t
+    val read_all : ?timeout:float ->
+                   priority:'a ->
+                   'a scheduler ->
+                   Io.socket -> (string,(string*Io.failure)) t
+    val write : ?timeout:float -> priority:'a -> ('a,'b) handler ->
+                string -> (unit,'b) t
+    val write_bigarray : ?timeout:float -> priority:'a -> ('a,'b) handler ->
+                         Io.bigarray -> (unit,'b) t
+  end
+
+  module MakeIo(Io:Io_t) =
+  struct
+    type socket = Io.socket
+    module Io = Io
+    type ('a,'b) handler = 
+      { scheduler    : 'a scheduler ;
+        socket       : Io.socket ;
+        mutable data : string ;
+        on_error     : Io.failure -> 'b }
+
     let exec ?(delay=0.) ~priority h f = 
       (fun h' -> 
         let handler _ =
@@ -986,5 +1055,7 @@ struct
          Io.write ?timeout ~priority ~on_error ~exec
                   ~bigarray:ba h.scheduler h.socket)
   end
+
+  module Io = MakeIo(Io)
 end
 

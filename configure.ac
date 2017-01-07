@@ -1,4 +1,4 @@
-AC_INIT([ocaml-duppy],[0.5.2],[savonet-users@lists.sourceforge.net])
+AC_INIT([ocaml-duppy],[0.6.0],[savonet-users@lists.sourceforge.net])
 
 VERSION=$PACKAGE_VERSION
 AC_SUBST(VERSION)
@@ -11,6 +11,22 @@ INC="$INC `$OCAMLFIND query pcre`"
 
 AC_CHECK_OCAML_BINDING([bytes],[],[],[1])
 INC="$INC `$OCAMLFIND query bytes`"
+
+AC_CHECK_OCAML_BINDING([ssl])
+
+if test "$w_SSL" == "yes"; then
+  INC="$INC `$OCAMLFIND query ssl`"
+  DUPPY_SSL="duppy_ssl"
+  DUPPY_SSL_META="package \"ssl\" (
+  description = \"OCaml advanced scheduler (SSL module)\"
+  requires = \"duppy ssl\"
+  version=\"${VERSION}\"
+  archive(byte) = \"duppy_ssl.cma\"
+  archive(native) = \"duppy_ssl.cmxa\"
+)"
+fi
+AC_SUBST(DUPPY_SSL)
+AC_SUBST(DUPPY_SSL_META)
 
 if test "$CAMLP4O" != "no" ; then
   PA_DUPPY="pa_duppy.cmo"
