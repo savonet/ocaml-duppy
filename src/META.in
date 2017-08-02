@@ -7,4 +7,6 @@ archive(native)="duppy.cmxa"
 
 @DUPPY_SSL_META@
 
+@DUPPY_SECURE_TRANSPORT_META@
+
 @PA_DUPPY_META@

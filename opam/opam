@@ -18,5 +18,9 @@ depends: [
   "ocamlfind"
   "pcre"
 ]
+depopts: [
+  "ssl"
+  "osx-secure-transport"
+]
 bug-reports: "https://github.com/savonet/ocaml-duppy/issues"
 dev-repo: "https://github.com/savonet/ocaml-duppy.git"

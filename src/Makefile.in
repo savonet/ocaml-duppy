@@ -42,7 +42,7 @@ OCAMLFLAGS = @OCAMLFLAGS@
 TRASH = pa_duppy.cm*
 ANNOTATE = true
 
-all: $(OCAMLBEST) @PA_DUPPY@ @DUPPY_SSL@
+all: $(OCAMLBEST) @PA_DUPPY@ @DUPPY_SSL@ @DUPPY_SECURE_TRANSPORT@
 
 pa_duppy.cmo: pa_duppy.ml pa_duppy.cmi
 	$(OCAMLFIND) ocamlc -c -package camlp4 -package camlp4.quotations.o -package camlp4.extend -syntax camlp4o pa_duppy.ml
@@ -52,6 +52,9 @@ pa_duppy.cmi: pa_duppy.mli
 
 duppy_ssl:
 	$(MAKE) SOURCES="duppy_ssl.mli duppy_ssl.ml" RESULT="duppy_ssl" $(OCAMLBEST)
+
+duppy_secure_transport:
+	$(MAKE) SOURCES="duppy_secure_transport.mli duppy_secure_transport.ml" RESULT="duppy_secure_transport" $(OCAMLBEST)
 
 byte: byte-code-library
 

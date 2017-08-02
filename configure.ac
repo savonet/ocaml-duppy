@@ -1,4 +1,4 @@
-AC_INIT([ocaml-duppy],[0.6.0],[savonet-users@lists.sourceforge.net])
+AC_INIT([ocaml-duppy],[0.6.1],[savonet-users@lists.sourceforge.net])
 
 VERSION=$PACKAGE_VERSION
 AC_SUBST(VERSION)
@@ -27,6 +27,22 @@ if test "$w_SSL" == "yes"; then
 fi
 AC_SUBST(DUPPY_SSL)
 AC_SUBST(DUPPY_SSL_META)
+
+AC_CHECK_OCAML_BINDING([osx-secure-transport])
+
+if test "$w_OSX_SECURE_TRANSPORT" == "yes"; then
+  INC="$INC `$OCAMLFIND query osx-secure-transport`"
+  DUPPY_SECURE_TRANSPORT="duppy_secure_transport"
+  DUPPY_SECURE_TRANSPORT_META="package \"secure_transport\" (
+  description = \"OCaml advanced scheduler (SecureTransport module)\"
+  requires = \"duppy secure_transport\"
+  version=\"${VERSION}\"
+  archive(byte) = \"duppy_secure_transport.cma\"
+  archive(native) = \"duppy_secure_transport.cmxa\"
+)"
+fi
+AC_SUBST(DUPPY_SECURE_TRANSPORT)
+AC_SUBST(DUPPY_SECURE_TRANSPORT_META)
 
 if test "$CAMLP4O" != "no" ; then
   PA_DUPPY="pa_duppy.cmo"
