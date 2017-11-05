@@ -1,4 +1,4 @@
-AC_INIT([ocaml-duppy],[0.6.1],[savonet-users@lists.sourceforge.net])
+AC_INIT([ocaml-duppy],[0.6.2],[savonet-users@lists.sourceforge.net])
 
 VERSION=$PACKAGE_VERSION
 AC_SUBST(VERSION)
@@ -44,7 +44,9 @@ fi
 AC_SUBST(DUPPY_SECURE_TRANSPORT)
 AC_SUBST(DUPPY_SECURE_TRANSPORT_META)
 
-if test "$CAMLP4O" != "no" ; then
+AC_CHECK_OCAML_BINDING([camlp4])
+
+if test "$w_CAMLP4" == "yes" ; then
   PA_DUPPY="pa_duppy.cmo"
   PA_DOC="pa_duppy.mli"
   PA_DUPPY_META="package \"syntax\" (
