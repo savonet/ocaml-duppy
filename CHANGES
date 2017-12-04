@@ -1,3 +1,7 @@
+0.7.1 ()
+=====
+* Use poll() when available.
+
 0.7.0 (03-11-2017)
 =====
 * Fix bytes compatibility with OCaml 4.06 and above.

@@ -22,6 +22,24 @@
 
 type fd = Unix.file_descr
 
+external poll : Unix.file_descr array -> Unix.file_descr array -> Unix.file_descr array -> float -> (Unix.file_descr array * Unix.file_descr array * Unix.file_descr array) = "caml_poll"
+
+let poll r w e timeout =
+  let r = Array.of_list r in
+  let w = Array.of_list w in
+  let e = Array.of_list e in
+  let (r, w, e) =
+    poll r w e timeout
+  in
+  (Array.to_list r,
+   Array.to_list w,
+   Array.to_list e)
+
+let select, select_fname =
+  match Sys.os_type with
+    | "Unix" -> poll, "poll"
+    | _ -> Unix.select, "select"
+
 (** [remove f l] is like [List.find f l] but also returns the result of removing
   * the found element from the original list. *)
 let remove f l =
@@ -175,11 +193,11 @@ let process s log =
         let timeout = 
           if e.t = infinity then -1. else max 0. (e.t -. (time ())) 
         in
-        log (Printf.sprintf "Enter select at %f, timeout %f (%d/%d/%d)."
-             (time ()) timeout
+        log (Printf.sprintf "Enter %s at %f, timeout %f (%d/%d/%d)."
+             select_fname (time ()) timeout
            (List.length e.r) (List.length e.w) (List.length e.x)) ;
-        let r,w,x = Unix.select e.r e.w e.x timeout in
-        log (Printf.sprintf "Left select at %f (%d/%d/%d)." (time ())
+        let r,w,x = select e.r e.w e.x timeout in
+        log (Printf.sprintf "Left %s at %f (%d/%d/%d)." select_fname (time ())
                (List.length r) (List.length w) (List.length x)) ;
         r,w,x
       with
