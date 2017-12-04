@@ -84,7 +84,7 @@ let create ?(compare=compare) () =
     stop = false;
   }
 
-let wake_up s = ignore (Unix.write s.in_pipe "x" 0 1)
+let wake_up s = ignore (Unix.write s.in_pipe (Bytes.of_string "x") 0 1)
 
 module Task = 
 struct
@@ -376,7 +376,7 @@ struct
     try
      begin
       match t.fd with
-         | Some t -> ignore (Unix.write t " " 0 1)
+         | Some t -> ignore (Unix.write t (Bytes.of_string " ") 0 1)
          | None -> raise Stopped
      end ;
      Mutex.unlock t.m
@@ -391,7 +391,7 @@ struct
        match t.fd with
          | Some c ->
               t.stop := true ; 
-              ignore (Unix.write c " " 0 1)
+              ignore (Unix.write c (Bytes.of_string " ") 0 1)
          | None   -> raise Stopped
       end ;
       t.fd <- None ;
@@ -436,7 +436,7 @@ sig
         marker -> (string*(string option) -> unit) -> unit
   val write :
         ?exec:(unit -> unit) -> ?on_error:(failure -> unit) ->
-        ?bigarray:bigarray -> ?string:string -> ?timeout:float -> priority:'a ->
+        ?bigarray:bigarray -> ?string:Bytes.t -> ?timeout:float -> priority:'a ->
         'a scheduler -> socket -> unit
 end
 
@@ -460,7 +460,7 @@ struct
            socket marker exec = 
     let length = 1024 in
     let b = Buffer.create length in
-    let buf = String.make length ' ' in
+    let buf = Bytes.make length ' ' in
     Buffer.add_string b init ;
     let unix_socket = Transport.sock socket in
     let events,check_timeout = 
@@ -476,7 +476,7 @@ struct
        begin
         let input = Transport.read socket buf 0 length in
         if input<=0 then raise Io ;
-        Buffer.add_substring b buf 0 input
+        Buffer.add_subbytes b buf 0 input
        end ;
       let ret = 
         match marker with
@@ -579,7 +579,7 @@ struct
     let length,write = 
       match string,bigarray with
         | Some s,_ -> 
-            String.length s,
+            Bytes.length s,
             Transport.write socket s
         | None,Some b ->
             Bigarray.Array1.dim b,
@@ -737,7 +737,7 @@ struct
       
       let stop = ref false
       
-      let wake_up () = ignore(Unix.write y " " 0 1)
+      let wake_up () = ignore(Unix.write y (Bytes.of_string " ") 0 1)
       
       let ctl_m = Mutex_o.create ()
      
@@ -946,7 +946,7 @@ struct
                    'a scheduler ->
                    Io.socket -> (string,(string*Io.failure)) t
     val write : ?timeout:float -> priority:'a -> ('a,'b) handler ->
-                string -> (unit,'b) t
+                Bytes.t -> (unit,'b) t
     val write_bigarray : ?timeout:float -> priority:'a -> ('a,'b) handler ->
                          Io.bigarray -> (unit,'b) t
   end

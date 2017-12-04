@@ -1,4 +1,4 @@
-AC_INIT([ocaml-duppy],[0.6.2],[savonet-users@lists.sourceforge.net])
+AC_INIT([ocaml-duppy],[0.7.0],[savonet-users@lists.sourceforge.net])
 
 VERSION=$PACKAGE_VERSION
 AC_SUBST(VERSION)
