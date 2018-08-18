@@ -171,7 +171,8 @@ open Task
 
 let stop s = 
   s.stop <- true ;
-  wake_up s
+  wake_up s;
+  List.iter Condition.signal s.queues
 
 let tmp = Bytes.create 1024
 

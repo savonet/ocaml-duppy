@@ -1,6 +1,7 @@
 0.7.1 ()
 =====
 * Use poll() when available.
+* Wake up all queues when shuttding down.
 
 0.7.0 (03-11-2017)
 =====
