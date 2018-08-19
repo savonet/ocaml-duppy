@@ -28,7 +28,7 @@ SOURCES = duppy_stubs.c duppy.ml duppy.mli
 RESULT = duppy
 OCAMLDOCFLAGS = -stars
 DOC_FILES = $(filter %.mli, $(SOURCES)) @PA_DOC@
-LIBINSTALL_FILES = $(wildcard *pa_duppy.cm* *.mli *.cmi *.cma *.cmxa *.cmx *.a *.so)
+LIBINSTALL_FILES = $(DOC_FILES) $(wildcard *pa_duppy.cm* *.cmi *.cma *.cmxa *.cmx *.a *.so)
 ACLIBS = @LIBS@
 LDFLAGS = @LDFLAGS@
 CLIBS = $(ACLIBS:-l%=%)
