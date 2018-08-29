@@ -142,6 +142,10 @@ CAMLprim value caml_poll(value _read, value _write, value _err, value _timeout) 
 
   CAMLreturn(_ret);
 }
+#else
+CAMLprim value caml_poll(value _read, value _write, value _err, value _timeout) {
+  assert false;
+}
 #endif
 
 CAMLprim value ocaml_duppy_write_ba(value _fd, value ba, value _ofs, value _len)
