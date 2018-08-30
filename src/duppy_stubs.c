@@ -144,7 +144,7 @@ CAMLprim value caml_poll(value _read, value _write, value _err, value _timeout) 
 }
 #else
 CAMLprim value caml_poll(value _read, value _write, value _err, value _timeout) {
-  assert false;
+  assert(false);
 }
 #endif
 
