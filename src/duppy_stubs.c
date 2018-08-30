@@ -40,7 +40,7 @@
 
 #ifdef WIN32
 #define Fd_val(fd) win_CRT_fd_of_filedescr(fd)
-#define Val_fd(fd) assert(false)
+#define Val_fd(fd) caml_failwith("Val_fd")
 #else
 #define Fd_val(fd) Int_val(fd)
 #define Val_fd(fd) Val_int(fd)
@@ -144,7 +144,7 @@ CAMLprim value caml_poll(value _read, value _write, value _err, value _timeout) 
 }
 #else
 CAMLprim value caml_poll(value _read, value _write, value _err, value _timeout) {
-  assert(false);
+  caml_failwith("caml_poll");
 }
 #endif
 
