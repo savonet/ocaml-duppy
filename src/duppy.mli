@@ -229,6 +229,11 @@ sig
     * [write ?exec ?on_error ?string ?bigarray ~priority scheduler socket] 
     * write data from [string], or from [bigarray] if no string is given, 
     * to [socket], and executes [exec] or [on_error] if errors occured.
+    *
+    * Caveat: on Win32, all file descriptors are expected to be in blocking
+    * mode before being passed to this call due to limitations in the emulation
+    * of the unix/posix API. See code comments for more details.
+    *
     * @param exec function to execute after writing, default: [fun () -> ()] 
     * @param on_error function to execute when an error occured, default: [fun _ -> ()] 
     * @param string write data from this string 

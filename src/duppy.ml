@@ -607,6 +607,11 @@ struct
             0,fun _ _ -> 0
     in
     let unix_socket = Transport.sock (socket:Transport.t) in
+    let exec () =
+      if Sys.os_type = "Win32" then
+        Unix.clear_nonblock unix_socket;
+      exec ()
+    in
     let events,check_timeout =
       match timeout with
         | None -> [`Write unix_socket], fun _ -> false
@@ -630,18 +635,30 @@ struct
           (exec () ; [])
       end
      with
+       | Unix.Unix_error(Unix.EWOULDBLOCK, _, _) when Sys.os_type = "Win32" ->
+           [{ priority = priority ; events = [`Write unix_socket] ;
+              handler = f pos }]
        | Timeout_exc -> on_error Timeout; []
        | Unix.Unix_error(x,y,z) -> on_error (Unix(x,y,z)); []
        | e -> on_error (Unknown e); []
-    in  
+    in
+    let task = {
+      priority = priority ;
+      events = events ;
+      handler  = (f 0)
+    } in
     if length > 0 then
-        let task = 
-          {
-            priority = priority ;
-            events = events ;
-            handler  = (f 0)
-          }
-        in
+      (* Win32 is particularly bad with writting on sockets. It is nearly impossible
+       * to write proper non-blocking code. send will block on blocking sockets if
+       * there isn't enough data available instead of returning a partial buffer
+       * and WSAEventSelect will not return if the socket still has available space.
+       * Thus, setting the socket to non-blocking and writting as much as we can. *)
+      if Sys.os_type = "Win32" then
+       begin
+        Unix.set_nonblock unix_socket ;
+        List.iter (add scheduler) (f 0 [`Write unix_socket])
+       end
+      else
         add scheduler task
     else 
         exec ()
