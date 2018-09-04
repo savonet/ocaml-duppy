@@ -79,6 +79,7 @@ type 'a scheduler =
   mutable queues : Condition.t list;
   queues_m : Mutex.t;
   mutable stop : bool;
+  stop_m : Mutex.t
 }
 
 let clear_tasks s = 
@@ -100,6 +101,7 @@ let create ?(compare=compare) () =
     queues = [];
     queues_m = Mutex.create ();
     stop = false;
+    stop_m = Mutex.create ()
   }
 
 let wake_up s = ignore (Unix.write s.in_pipe (Bytes.of_string "x") 0 1)
@@ -170,9 +172,14 @@ end
 open Task
 
 let stop s = 
-  s.stop <- true ;
+  clear_tasks s;
+  Mutex.lock s.stop_m;
+  s.stop <- true;
+  Mutex.unlock s.stop_m;
   wake_up s;
-  List.iter Condition.signal s.queues
+  Mutex.lock s.ready_m;
+  List.iter Condition.signal s.queues;
+  Mutex.unlock s.ready_m
 
 let tmp = Bytes.create 1024
 
@@ -273,6 +280,9 @@ let exec s (priorities:'a->bool) =
       true
   with Not_found -> false
 
+exception Queue_stopped
+exception Queue_processed
+
  (** Main loop for queues. *)
 let queue ?log ?(priorities=fun _ -> true) s name = 
   let log = 
@@ -288,49 +298,59 @@ let queue ?log ?(priorities=fun _ -> true) s name =
       log (Printf.sprintf "Queue #%d starting..." (List.length s.queues)) ;
       c
   in
-    (* Try to process ready tasks, otherwise try to become the master,
-     * or be a slave and wait for the master to get some more ready tasks. *)
-    while not s.stop do
-      (* Lock the ready tasks until the queue has a task to proceed,
-       * *or* is really ready to restart on its condition, see the 
-       * Condition.wait call below for the atomic unlock and wait. *)
-      Mutex.lock s.ready_m ;
-      log (Printf.sprintf "There are %d ready tasks." (List.length s.ready)) ;
-      if exec s priorities then () else 
-          let wake () = 
-            (* Wake up other queues 
-	     * if there are remaining tasks *)
-            if s.ready <> [] then begin
-	        Mutex.lock s.queues_m ;
-                List.iter (fun x -> if x <> c then Condition.signal x) 
-		          s.queues ;
-	        Mutex.unlock s.queues_m 
-	      end ;
-          in
-          if Mutex.try_lock s.select_m then begin
-	    (* Processing finished for me
-	     * I can unlock ready_m now.. *)
+  (* Try to process ready tasks, otherwise try to become the master,
+   * or be a slave and wait for the master to get some more ready tasks. *)
+  let run () =
+    Mutex.lock s.stop_m;
+    let stop = s.stop in
+    Mutex.unlock s.stop_m;
+    if stop then raise Queue_stopped;
+    (* Lock the ready tasks until the queue has a task to proceed,
+     * *or* is really ready to restart on its condition, see the 
+     * Condition.wait call below for the atomic unlock and wait. *)
+    Mutex.lock s.ready_m ;
+    log (Printf.sprintf "There are %d ready tasks." (List.length s.ready)) ;
+    if exec s priorities then raise Queue_processed;
+    let wake () = 
+      (* Wake up other queues if there are remaining tasks *)
+      if s.ready <> [] then
+       begin
+	      Mutex.lock s.queues_m ;
+        List.iter (fun x -> if x <> c then Condition.signal x) 
+		    s.queues ;
+	      Mutex.unlock s.queues_m 
+	     end ;
+    in
+    if Mutex.try_lock s.select_m then begin
+	   (* Processing finished for me
+	    * I can unlock ready_m now.. *)
 	    Mutex.unlock s.ready_m ;
-            process s log ;
-            Mutex.unlock s.select_m ;
+      process s log ;
+      Mutex.unlock s.select_m ;
 	    Mutex.lock s.ready_m ;
-            wake () ;
+      wake () ;
 	    Mutex.unlock s.ready_m
-          end else begin
-              (* We use s.ready_m mutex here.
-	       * Hence, we avoid race conditions
-	       * with any other queue being processing
-	       * a task that would create a new task: 
-	       * without this mutex, the new task may not be 
-	       * notified to this queue if it is going to sleep
-	       * in concurrency..
-	       * It also avoid race conditions when restarting 
-	       * queues since s.ready_m is locked until all 
-	       * queues have been signaled. *)
-              Condition.wait c s.ready_m;
-              Mutex.unlock s.ready_m
-            end
-    done
+    end else begin
+    (* We use s.ready_m mutex here.
+  	 * Hence, we avoid race conditions
+  	 * with any other queue being processing
+  	 * a task that would create a new task: 
+  	 * without this mutex, the new task may not be 
+	   * notified to this queue if it is going to sleep
+	   * in concurrency..
+	   * It also avoid race conditions when restarting 
+	   * queues since s.ready_m is locked until all 
+	   * queues have been signaled. *)
+     Condition.wait c s.ready_m;
+     Mutex.unlock s.ready_m
+    end
+   in
+   let rec f () =
+     try run (); f () with
+      | Queue_processed -> f ()
+      | Queue_stopped -> ()
+   in
+   f ()
 
 module Async =
 struct
