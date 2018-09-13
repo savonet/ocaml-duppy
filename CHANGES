@@ -1,4 +1,4 @@
-0.7.3 ()
+0.7.3 (12-09-2018)
 =====
 * Fix write/select logic on windows systems. (savonet/liquidsoap#610)
 * Avoid race conditions when shutting down.
