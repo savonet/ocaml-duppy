@@ -46,17 +46,17 @@ AC_SUBST(DUPPY_SECURE_TRANSPORT_META)
 
 AC_CHECK_OCAML_BINDING([camlp4])
 
-if test "$w_CAMLP4" == "yes" ; then
-  PA_DUPPY="pa_duppy.cmo"
-  PA_DOC="pa_duppy.mli"
-  PA_DUPPY_META="package \"syntax\" (
-  description = \"Syntactic sugars for Duppy\"
-  requires = \"camlp4\"
-  version=\"${VERSION}\"
-  archive(syntax,preprocessor) = \"pa_duppy.cmo\"
-  archive(syntax,toploop) = \"pa_duppy.cmo\"
-)"
-fi
+#if test "$w_CAMLP4" == "yes" ; then
+#  PA_DUPPY="pa_duppy.cmo"
+#  PA_DOC="pa_duppy.mli"
+#  PA_DUPPY_META="package \"syntax\" (
+#  description = \"Syntactic sugars for Duppy\"
+#  requires = \"camlp4\"
+#  version=\"${VERSION}\"
+#  archive(syntax,preprocessor) = \"pa_duppy.cmo\"
+#  archive(syntax,toploop) = \"pa_duppy.cmo\"
+#)"
+#fi
 
 AC_SUBST(PA_DUPPY)
 AC_SUBST(PA_DUPPY_META)
