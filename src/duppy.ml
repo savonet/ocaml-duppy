@@ -346,11 +346,15 @@ let queue ?log ?(priorities=fun _ -> true) s name =
     end
    in
    let rec f () =
-     try run (); f () with
-      | Queue_processed -> f ()
-      | Queue_stopped -> ()
+    begin
+     try run () with
+      | Queue_processed -> ()
+    end;
+    f ()
    in
-   f ()
+   try
+     f ()
+   with Queue_stopped -> ()
 
 module Async =
 struct

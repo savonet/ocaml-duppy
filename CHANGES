@@ -1,3 +1,7 @@
+0.7.4 ()
+=====
+* Fix stack overflow by making recursive function fully tail-rec. (ref savonet/liquidsoap#640)
+
 0.7.3 (12-09-2018)
 =====
 * Fix write/select logic on windows systems. (savonet/liquidsoap#610)
