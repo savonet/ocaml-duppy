@@ -8,11 +8,14 @@ Please read the COPYING file before using this software.
 Prerequisites:
 ==============
 
-- ocaml >= 3.0.6 (haven't tried earlier versions)
+- ocaml >= 4.03.0
 
-- findlib >= 0.8.1 (haven't tried earlier versions)
+- findlib >= 1.8.0
 
-- ocaml-pcre >= 5.12.2 (haven't tried earlier versions)
+- ocaml-pcre >= 7.3.4
+
+The code may work with earlier versions but these are the one currently
+supported.
 
 Compilation:
 ============

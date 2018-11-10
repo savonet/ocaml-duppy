@@ -350,7 +350,7 @@ let queue ?log ?(priorities=fun _ -> true) s name =
      try run () with
       | Queue_processed -> ()
     end;
-    f ()
+    (f [@tailcall]) ()
    in
    try
      f ()
