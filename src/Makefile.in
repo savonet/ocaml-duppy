@@ -27,8 +27,8 @@ OCAMLLIBPATH = @CAMLLIBPATH@
 SOURCES = duppy_stubs.c duppy.ml duppy.mli
 RESULT = duppy
 OCAMLDOCFLAGS = -stars
-DOC_FILES = $(filter %.mli, $(SOURCES)) @PA_DOC@
-LIBINSTALL_FILES = $(DOC_FILES) $(wildcard *pa_duppy.cm* *.cmi *.cma *.cmxa *.cmx *.a *.so)
+DOC_FILES = $(filter %.mli, $(SOURCES))
+LIBINSTALL_FILES = $(DOC_FILES) $(wildcard *.cmi *.cma *.cmxa *.cmx *.a *.so)
 ACLIBS = @LIBS@
 LDFLAGS = @LDFLAGS@
 CLIBS = $(ACLIBS:-l%=%)
@@ -39,16 +39,9 @@ CPPFLAGS = @CPPFLAGS@
 INCDIRS = @INC@
 NO_CUSTOM = yes
 OCAMLFLAGS = @OCAMLFLAGS@
-TRASH = pa_duppy.cm*
 ANNOTATE = true
 
-all: $(OCAMLBEST) @PA_DUPPY@ @DUPPY_SSL@ @DUPPY_SECURE_TRANSPORT@
-
-pa_duppy.cmo: pa_duppy.ml pa_duppy.cmi
-	$(OCAMLFIND) ocamlc -c -package camlp4 -package camlp4.quotations.o -package camlp4.extend -syntax camlp4o pa_duppy.ml
-
-pa_duppy.cmi: pa_duppy.mli
-	$(OCAMLFIND) ocamlc -c -package camlp4 -package camlp4.quotations.o -package camlp4.extend -syntax camlp4o pa_duppy.mli
+all: $(OCAMLBEST) @DUPPY_SSL@ @DUPPY_SECURE_TRANSPORT@
 
 duppy_ssl:
 	$(MAKE) SOURCES="duppy_ssl.mli duppy_ssl.ml" RESULT="duppy_ssl" $(OCAMLBEST)

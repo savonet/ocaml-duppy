@@ -1,4 +1,4 @@
-AC_INIT([ocaml-duppy],[0.7.4],[savonet-users@lists.sourceforge.net])
+AC_INIT([ocaml-duppy],[0.8.0],[savonet-users@lists.sourceforge.net])
 
 VERSION=$PACKAGE_VERSION
 AC_SUBST(VERSION)
@@ -43,24 +43,6 @@ if test "$w_OSX_SECURE_TRANSPORT" == "yes"; then
 fi
 AC_SUBST(DUPPY_SECURE_TRANSPORT)
 AC_SUBST(DUPPY_SECURE_TRANSPORT_META)
-
-AC_CHECK_OCAML_BINDING([camlp4])
-
-if test "$w_CAMLP4" == "yes" ; then
-  PA_DUPPY="pa_duppy.cmo"
-  PA_DOC="pa_duppy.mli"
-  PA_DUPPY_META="package \"syntax\" (
-  description = \"Syntactic sugars for Duppy\"
-  requires = \"camlp4\"
-  version=\"${VERSION}\"
-  archive(syntax,preprocessor) = \"pa_duppy.cmo\"
-  archive(syntax,toploop) = \"pa_duppy.cmo\"
-)"
-fi
-
-AC_SUBST(PA_DUPPY)
-AC_SUBST(PA_DUPPY_META)
-AC_SUBST(PA_DOC)
 
 # substitutions to perform
 requires="unix threads pcre bigarray"

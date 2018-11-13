@@ -18,7 +18,6 @@ depends: [
   "pcre"
 ]
 depopts: [
-  "camlp4"
   "ssl"
   "osx-secure-transport"
 ]
