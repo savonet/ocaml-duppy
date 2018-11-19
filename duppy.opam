@@ -1,25 +1,22 @@
-opam-version: "1.2"
+opam-version: "2.0"
 version: "dev"
 maintainer: "Romain Beauxis <toots@rastageeks.org>"
 authors: "The Savonet Team <savonet-users@lists.sourceforge.net>"
 homepage: "https://github.com/savonet/ocaml-duppy"
+bug-reports: "https://github.com/savonet/ocaml-duppy/issues"
+depends: [
+  "ocaml"
+  "ocamlfind" {build}
+  "pcre"
+]
+depopts: ["ssl" "osx-secure-transport"]
+flags: light-uninstall
 build: [
   ["./bootstrap"]
   ["./configure" "--prefix" prefix]
   [make clean]
   [make]
 ]
-install: [
-  [make "install"]
-]
+install: [make "install"]
 remove: ["ocamlfind" "remove" "duppy"]
-depends: [
-  "ocamlfind" {build}
-  "pcre"
-]
-depopts: [
-  "ssl"
-  "osx-secure-transport"
-]
-bug-reports: "https://github.com/savonet/ocaml-duppy/issues"
-dev-repo: "https://github.com/savonet/ocaml-duppy.git"
+dev-repo: "git+https://github.com/savonet/ocaml-duppy.git"
