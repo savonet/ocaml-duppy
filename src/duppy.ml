@@ -255,12 +255,12 @@ let process s log =
       s.ready <- List.stable_sort (fun (p,_) (p',_) -> s.compare p p') (s.ready @ r) ;
       Mutex.unlock s.ready_m
 
-  (** Code for a queue to process ready tasks.
-    * Returns true a task was found (and hence processed).
-    *
-    * s.ready_m *must* be locked before calling
-    * this function, and is freed *only* 
-    * if some task was processed. *) 
+(** Code for a queue to process ready tasks.
+  * Returns true a task was found (and hence processed).
+  *
+  * s.ready_m *must* be locked before calling
+  * this function, and is freed *only* 
+  * if some task was processed. *) 
 let exec s (priorities:'a->bool) =
   (* This assertion does not work on
    * win32 because a thread can double-lock
@@ -315,32 +315,32 @@ let queue ?log ?(priorities=fun _ -> true) s name =
       (* Wake up other queues if there are remaining tasks *)
       if s.ready <> [] then
        begin
-	      Mutex.lock s.queues_m ;
+        Mutex.lock s.queues_m ;
         List.iter (fun x -> if x <> c then Condition.signal x) 
-		    s.queues ;
-	      Mutex.unlock s.queues_m 
-	     end ;
+          s.queues ;
+        Mutex.unlock s.queues_m 
+       end ;
     in
     if Mutex.try_lock s.select_m then begin
-	   (* Processing finished for me
-	    * I can unlock ready_m now.. *)
-	    Mutex.unlock s.ready_m ;
+      (* Processing finished for me
+       * I can unlock ready_m now.. *)
+      Mutex.unlock s.ready_m ;
       process s log ;
       Mutex.unlock s.select_m ;
-	    Mutex.lock s.ready_m ;
+      Mutex.lock s.ready_m ;
       wake () ;
-	    Mutex.unlock s.ready_m
+      Mutex.unlock s.ready_m
     end else begin
     (* We use s.ready_m mutex here.
-  	 * Hence, we avoid race conditions
-  	 * with any other queue being processing
-  	 * a task that would create a new task: 
-  	 * without this mutex, the new task may not be 
-	   * notified to this queue if it is going to sleep
-	   * in concurrency..
-	   * It also avoid race conditions when restarting 
-	   * queues since s.ready_m is locked until all 
-	   * queues have been signaled. *)
+     * Hence, we avoid race conditions
+     * with any other queue being processing
+     * a task that would create a new task: 
+     * without this mutex, the new task may not be 
+     * notified to this queue if it is going to sleep
+     * in concurrency..
+     * It also avoid race conditions when restarting 
+     * queues since s.ready_m is locked until all 
+     * queues have been signaled. *)
      Condition.wait c s.ready_m;
      Mutex.unlock s.ready_m
     end
