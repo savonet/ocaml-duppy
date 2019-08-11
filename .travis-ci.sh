@@ -1,7 +1,7 @@
 # Hacking the build into Travis-CI "C" environment
 # See http://anil.recoil.org/2013/09/30/travis-and-ocaml.html
 
-OPAM_PACKAGES='ocamlfind base-bytes pcre camlp4'
+OPAM_PACKAGES='ocamlfind base-bytes pcre'
 
 export OPAMYES=1
 opam init
@@ -12,4 +12,4 @@ eval `opam config env`
 opam install -q -y ${OPAM_PACKAGES}
 
 # compile & run tests
-./bootstrap && ./configure && make
+./bootstrap && ./configure && make && make -C examples

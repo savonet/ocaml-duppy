@@ -58,9 +58,9 @@ let handle_client socket =
   let on_error e =
     match e with
     | Duppy.Io.Io_error -> Printf.printf "Client disconnected"
-    | Duppy.Io.Unix (c, p, m) ->
-        Printf.printf "%s" (Printexc.to_string (Unix.Unix_error (c, p, m)))
+    | Duppy.Io.Unix (c, p, m) -> Printf.printf "%s" (Printexc.to_string (Unix.Unix_error (c, p, m)))
     | Duppy.Io.Unknown e -> Printf.printf "%s" (Printexc.to_string e)
+    | Duppy.Io.Timeout -> Printf.printf "Timeout"
   in
   let h = {Duppy.Monad.Io.scheduler; socket; data= ""; on_error} in
   (* Read and process lines *)
@@ -83,19 +83,19 @@ let handle_client socket =
             Duppy.Monad.bind
               (Duppy.Monad.bind
                  (Duppy.Monad.Io.write ?timeout:None ~priority:io_priority h
-                    "BEGIN\r\n") (fun () ->
+                    (Bytes.unsafe_of_string "BEGIN\r\n")) (fun () ->
                    Duppy.Monad.bind
                      (Duppy.Monad.Io.write ?timeout:None ~priority:io_priority
-                        h ans) (fun () ->
+                        h (Bytes.unsafe_of_string ans)) (fun () ->
                        Duppy.Monad.Io.write ?timeout:None ~priority:io_priority
-                         h "\r\nEND\r\n" ) ))
+                         h (Bytes.unsafe_of_string "\r\nEND\r\n")) ))
               (fun () -> exec ()) ) )
   in
   let close () = try Unix.close socket with _ -> () in
   let return () =
     let on_error e = on_error e ; close () in
     Duppy.Io.write ~priority:io_priority ~on_error ~exec:close scheduler
-      ~string:"Bye!\r\n" socket
+      ~string:(Bytes.unsafe_of_string "Bye!\r\n") socket
   in
   Duppy.Monad.run ~return ~raise:close (exec ())
 

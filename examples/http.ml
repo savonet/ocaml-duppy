@@ -76,7 +76,7 @@ exception Assoc of string
 let assoc_uppercase x y =
   try
     List.iter
-      (fun (l, v) -> if String.uppercase l = x then raise (Assoc v) else ())
+      (fun (l, v) -> if String.uppercase_ascii l = x then raise (Assoc v) else ())
       y ;
     raise Not_found
   with Assoc s -> s
@@ -120,7 +120,7 @@ type socket_status = Keep | Close
 
 let send_reply h reply =
   let write s =
-    Duppy.Monad.Io.write ?timeout:None ~priority:Non_blocking h s
+    Duppy.Monad.Io.write ?timeout:None ~priority:Non_blocking h (Bytes.unsafe_of_string s)
   in
   let code, status = reply.reply_status in
   let http_header =
@@ -137,10 +137,8 @@ let send_reply h reply =
       | String s -> write s
       | File fd ->
           let stats = Unix.fstat fd in
-          let ba =
-            Bigarray.Array1.map_file fd Bigarray.char Bigarray.c_layout false
-              stats.Unix.st_size
-          in
+          let ba = Unix.map_file fd Bigarray.char Bigarray.c_layout false [|stats.Unix.st_size|] in
+          let ba = Bigarray.array1_of_genarray ba in
           let close () = try Unix.close fd with _ -> () in
           let on_error e =
             close () ;
@@ -265,7 +263,7 @@ let cgi_handler process path h request =
         Printf.sprintf "%s; export PATH_TRANSLATED=%s; export PATH_INFO=%s" env
           (Filename.quote tr_suffix) (Filename.quote suffix)
       in
-      let sanitize s = Pcre.replace ~pat:"-" ~templ:"_" (String.uppercase s) in
+      let sanitize s = Pcre.replace ~pat:"-" ~templ:"_" (String.uppercase_ascii s) in
       let headers =
         List.map (fun (x, y) -> (sanitize x, y)) request.request_headers
       in
@@ -307,7 +305,7 @@ let cgi_handler process path h request =
           let out_s = Unix.descr_of_out_channel out_c in
           let h = {h with Duppy.Monad.Io.socket= out_s; data= ""} in
           let __pa_duppy_0 =
-            Duppy.Monad.Io.write ?timeout:None ~priority:Non_blocking h data
+            Duppy.Monad.Io.write ?timeout:None ~priority:Non_blocking h (Bytes.unsafe_of_string data)
           in
           Duppy.Monad.bind __pa_duppy_0 (fun () ->
               let in_s = Unix.descr_of_in_channel in_c in
