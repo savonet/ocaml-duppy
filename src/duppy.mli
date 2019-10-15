@@ -245,7 +245,7 @@ sig
     *                forever. *)
   val write :
         ?exec:(unit -> unit) -> ?on_error:(failure -> unit) -> 
-        ?bigarray:bigarray -> ?string:Bytes.t -> ?timeout:float -> priority:'a -> 
+        ?bigarray:bigarray -> ?offset:int -> ?length:int -> ?string:Bytes.t -> ?timeout:float -> priority:'a ->
         'a scheduler -> socket -> unit
 end
 
@@ -498,8 +498,8 @@ sig
       * forces the computation to return an error if
       * nothing has been written for more than [timeout] 
       * seconds. Default: wait forever. *)
-    val write : ?timeout:float -> priority:'a -> ('a,'b) handler -> 
-                Bytes.t -> (unit,'b) t
+    val write : ?timeout:float -> priority:'a -> ('a,'b) handler ->
+                ?offset:int -> ?length:int -> Bytes.t -> (unit,'b) t
 
     (** [write_bigarray ?timeout ~priority h ba] creates a computation
       * that writes data from [ba] to [h.socket]. This function
