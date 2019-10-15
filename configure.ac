@@ -1,4 +1,6 @@
-AC_INIT([ocaml-duppy],[0.8.0],[savonet-users@lists.sourceforge.net])
+AC_INIT([ocaml-duppy],
+        m4_esyscmd([cat duppy.opam | grep ^version | sed 's/version: "\([^"]*\)"/\1/' | tr -d '\r\n']),
+        [savonet-users@lists.sourceforge.net])
 
 VERSION=$PACKAGE_VERSION
 AC_SUBST(VERSION)
