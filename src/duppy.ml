@@ -479,7 +479,7 @@ sig
         marker -> (string*(string option) -> unit) -> unit
   val write :
         ?exec:(unit -> unit) -> ?on_error:(failure -> unit) ->
-        ?bigarray:bigarray -> ?string:Bytes.t -> ?timeout:float -> priority:'a ->
+        ?bigarray:bigarray -> ?offset:int -> ?length:int -> ?string:Bytes.t -> ?timeout:float -> priority:'a ->
         'a scheduler -> socket -> unit
 end
 
@@ -617,18 +617,24 @@ struct
       add scheduler task
 
   let write ?(exec=fun () -> ()) ?(on_error=fun _ -> ()) 
-            ?bigarray ?string ?timeout ~priority
+            ?bigarray ?offset ?length ?string ?timeout ~priority
             (scheduler:'a scheduler) socket = 
-    let length,write = 
+    let offset,length,write =
       match string,bigarray with
-        | Some s,_ -> 
-            Bytes.length s,
+        | Some s,_ ->
+            let offset = match offset with Some offset -> offset | None -> 0 in
+            let length = match length with Some length -> length | None -> Bytes.length s in
+            offset,
+            length,
             Transport.write socket s
         | None,Some b ->
-            Bigarray.Array1.dim b,
+            let offset = match offset with Some offset -> offset | None -> 0 in
+            let length = match length with Some length -> length | None -> Bigarray.Array1.dim b in
+            offset,
+            length,
             Transport.ba_write socket b
         | _ ->
-            0,fun _ _ -> 0
+            0,0,fun _ _ -> 0
     in
     let unix_socket = Transport.sock (socket:Transport.t) in
     let exec () =
@@ -669,7 +675,7 @@ struct
     let task = {
       priority = priority ;
       events = events ;
-      handler  = (f 0)
+      handler  = (f offset)
     } in
     if length > 0 then
       (* Win32 is particularly bad with writting on sockets. It is nearly impossible
@@ -1006,7 +1012,7 @@ struct
                    'a scheduler ->
                    Io.socket -> (string,(string*Io.failure)) t
     val write : ?timeout:float -> priority:'a -> ('a,'b) handler ->
-                Bytes.t -> (unit,'b) t
+                ?offset:int -> ?length:int -> Bytes.t -> (unit,'b) t
     val write_bigarray : ?timeout:float -> priority:'a -> ('a,'b) handler ->
                          Io.bigarray -> (unit,'b) t
   end
@@ -1093,7 +1099,7 @@ struct
      in
      catch (f ()) catch_ret
 
-    let write ?timeout ~priority h s =
+    let write ?timeout ~priority h ?offset ?length s =
       (fun h' ->
          let on_error x =
            h'.raise (h.on_error x)
@@ -1101,8 +1107,7 @@ struct
          let exec () = 
            h'.return ()
          in
-         Io.write ?timeout ~priority ~on_error ~exec 
-                  ~string:s h.scheduler h.socket)
+         Io.write ?timeout ~priority ~on_error ~exec ?offset ?length ~string:s h.scheduler h.socket)
 
     let write_bigarray ?timeout ~priority h ba =
       (fun h' ->
