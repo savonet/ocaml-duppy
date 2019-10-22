@@ -617,18 +617,16 @@ struct
       add scheduler task
 
   let write ?(exec=fun () -> ()) ?(on_error=fun _ -> ()) 
-            ?bigarray ?offset ?length ?string ?timeout ~priority
+            ?bigarray ?(offset=0) ?length ?string ?timeout ~priority
             (scheduler:'a scheduler) socket = 
     let offset,length,write =
       match string,bigarray with
         | Some s,_ ->
-            let offset = match offset with Some offset -> offset | None -> 0 in
             let length = match length with Some length -> length | None -> Bytes.length s in
             offset,
             length,
             Transport.write socket s
         | None,Some b ->
-            let offset = match offset with Some offset -> offset | None -> 0 in
             let length = match length with Some length -> length | None -> Bigarray.Array1.dim b in
             offset,
             length,
