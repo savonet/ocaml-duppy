@@ -619,20 +619,18 @@ struct
   let write ?(exec=fun () -> ()) ?(on_error=fun _ -> ()) 
             ?bigarray ?(offset=0) ?length ?string ?timeout ~priority
             (scheduler:'a scheduler) socket = 
-    let offset,length,write =
+    let length,write =
       match string,bigarray with
         | Some s,_ ->
             let length = match length with Some length -> length | None -> Bytes.length s in
-            offset,
             length,
             Transport.write socket s
         | None,Some b ->
             let length = match length with Some length -> length | None -> Bigarray.Array1.dim b in
-            offset,
             length,
             Transport.ba_write socket b
         | _ ->
-            0,0,fun _ _ -> 0
+            0,fun _ _ -> 0
     in
     let unix_socket = Transport.sock (socket:Transport.t) in
     let exec () =
