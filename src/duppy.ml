@@ -684,7 +684,7 @@ struct
       if Sys.os_type = "Win32" then
        begin
         Unix.set_nonblock unix_socket ;
-        List.iter (add scheduler) (f 0 [`Write unix_socket])
+        List.iter (add scheduler) (f offset [`Write unix_socket])
        end
       else
         add scheduler task
