@@ -44,7 +44,7 @@ AC_SUBST(DUPPY_SECURE_TRANSPORT)
 AC_SUBST(DUPPY_SECURE_TRANSPORT_META)
 
 # substitutions to perform
-requires="unix threads bigarray"
+requires="unix threads bigarray str"
 AC_SUBST(VERSION)
 ALL_INC="`ocamlfind query -r -separator " " $requires` $_INC"
 INC="$INC $_INC"
