@@ -1281,6 +1281,7 @@ rawuninstall:
 clean::
 	rm -f $(TARGETS) $(TRASH)
 	rm -rf $(BCDIDIR) $(NCDIDIR) $(MLDEPDIR)
+	rm -f *.a *.annot *.cma *.cmi *.cmo *.cmt *.cmti *.cmx *.cmxa *.o
 
 .PHONY:	cleanup
 cleanup::
