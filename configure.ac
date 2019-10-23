@@ -8,9 +8,6 @@ AC_MSG_RESULT([configuring $PACKAGE_STRING])
 
 AC_BASE_CHECKS()
 
-AC_CHECK_OCAML_BINDING([pcre],[],[],[1])
-INC="$INC `$OCAMLFIND query pcre`"
-
 AC_CHECK_OCAML_BINDING([bytes],[],[],[1])
 INC="$INC `$OCAMLFIND query bytes`"
 
@@ -47,7 +44,7 @@ AC_SUBST(DUPPY_SECURE_TRANSPORT)
 AC_SUBST(DUPPY_SECURE_TRANSPORT_META)
 
 # substitutions to perform
-requires="unix threads pcre bigarray"
+requires="unix threads bigarray"
 AC_SUBST(VERSION)
 ALL_INC="`ocamlfind query -r -separator " " $requires` $_INC"
 INC="$INC $_INC"

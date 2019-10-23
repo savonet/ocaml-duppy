@@ -524,17 +524,16 @@ struct
       let ret = 
         match marker with
           | Split r ->
-                let rex = Pcre.regexp r in
+                let rex = Str.regexp r in
                 let acc = Buffer.contents b in
-                let ret = Pcre.full_split ~max:2 ~rex acc  in
+                let ret = Str.full_split rex acc  in
                 let rec p l = 
                  match l with
-                   | Pcre.Text x :: Pcre.Delim _ :: l -> 
+                   | Str.Text x :: Str.Delim _ :: l ->
                        let f b x =
                          match x with
-                           | Pcre.Text s 
-                           | Pcre.Delim s -> Buffer.add_string b s 
-                           | _      -> ()
+                           | Str.Text s
+                           | Str.Delim s -> Buffer.add_string b s
                        in
                        if recursive then
                         begin
