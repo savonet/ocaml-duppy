@@ -12,4 +12,4 @@ eval `opam config env`
 opam install -q -y ${OPAM_PACKAGES}
 
 # compile & run tests
-./bootstrap && ./configure && make && make -C examples
+dune build
