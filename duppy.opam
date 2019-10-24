@@ -12,11 +12,10 @@ depends: [
 ]
 depopts: ["ssl" "osx-secure-transport"]
 build: [
-  ["./bootstrap"] {dev}
-  ["./configure" "--prefix" prefix]
-  [make "clean"] {dev}
-  [make]
+  ["dune" "subst"] {pinned}
+  ["dune" "build" "-p" name "-j" jobs]
+  ["dune" "build" "@examples"] {with-test}
+  ["dune" "runtest" "-p" name "-j" jobs] {with-test}
 ]
-install: [make "install"]
 dev-repo: "git+https://github.com/savonet/ocaml-duppy.git"
 synopsis: "Library providing monadic threads"
