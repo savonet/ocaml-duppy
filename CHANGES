@@ -1,5 +1,6 @@
 0.8.1
 =====
+* Switch build system to dune.
 * Add offset/length to writing functions.
 
 0.8.0 (12-11-2018)

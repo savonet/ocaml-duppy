@@ -1,0 +1,6 @@
+(library
+ (name            duppy)
+ (public_name     duppy)
+ (synopsis        "Monadic threads.")
+ (libraries       threads pcre)
+ (c_names         duppy_stubs))
