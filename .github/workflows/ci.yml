@@ -17,7 +17,7 @@ jobs:
     - name: Pin locally
       run: opam pin -y add --no-action .
     - name: Install locally
-      run: opam install -y duppy
+      run: depext -y -i duppy
     - name: Build locally
       run: eval $(opam env) && dune build
     - name: Run tests locally
