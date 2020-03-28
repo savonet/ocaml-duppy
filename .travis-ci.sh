@@ -7,7 +7,9 @@ if [ -n "${OPAM_SWITCH}" ]; then
     opam switch ${OPAM_SWITCH}
 fi
 eval `opam config env`
-opam install -q -y dune
+opam install -y depext dune
+opam pin -y add --no-action .
+opam depext -y -i duppy
 
 # compile
 dune build
