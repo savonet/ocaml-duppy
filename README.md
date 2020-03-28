@@ -1,6 +1,5 @@
 ocaml-duppy
 
-
 ocaml-duppy is an advanced scheduler for Ocaml programmers.
 
 Please read the COPYING file before using this software.
@@ -13,6 +12,8 @@ Prerequisites:
 - findlib >= 1.8.0
 
 - ocaml-pcre >= 7.3.4
+
+- dune >= 2.0
 
 The code may work with earlier versions but these are the one currently
 supported.
@@ -28,7 +29,16 @@ extension library.
 Installation:
 =============
 
-	$ make install
+Via `opam`:
+
+```sh
+$ opam install duppy
+```
+
+Via `dune` (for developers):
+```sh
+$ dune install
+```
 
 This should install the library file (using ocamlfind) in the
 appropriate place.
