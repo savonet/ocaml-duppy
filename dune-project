@@ -1,5 +1,5 @@
 (lang dune 2.0)
-(version 0.6.5)
+(version 0.9.0)
 (name duppy)
 (source (github savonet/ocaml-duppy))
 (license GPL-2.0)
