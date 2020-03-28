@@ -1,11 +1,10 @@
-ocaml-duppy
+# ocaml-duppy
 
 ocaml-duppy is an advanced scheduler for Ocaml programmers.
 
 Please read the COPYING file before using this software.
 
-Prerequisites:
-==============
+## Prerequisites:
 
 - ocaml >= 4.03.0
 
@@ -18,16 +17,16 @@ Prerequisites:
 The code may work with earlier versions but these are the one currently
 supported.
 
-Compilation:
-============
+## Compilation:
 
-	$ make all
+```sh
+$ dune build
+```
 
 This should build both the native and the byte-code version of the
 extension library.
 
-Installation:
-=============
+## Installation:
 
 Via `opam`:
 
@@ -43,8 +42,7 @@ $ dune install
 This should install the library file (using ocamlfind) in the
 appropriate place.
 
-Author:
-=======
+## Author:
 
 This author of this software may be contacted by electronic mail
 at the following address: savonet-users@lists.sourceforge.net.
