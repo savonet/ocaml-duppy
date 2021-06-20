@@ -76,6 +76,7 @@ type 'a scheduler = {
   queues_m : Mutex.t;
   mutable stop : bool;
   stop_m : Mutex.t;
+  queue_stopped_c : Condition.t;
 }
 
 let clear_tasks s =
@@ -98,6 +99,7 @@ let create ?(compare = compare) () =
     queues_m = Mutex.create ();
     stop = false;
     stop_m = Mutex.create ();
+    queue_stopped_c = Condition.create ();
   }
 
 let wake_up s = ignore (Unix.write s.in_pipe (Bytes.of_string "x") 0 1)
@@ -171,10 +173,15 @@ let stop s =
   Mutex.lock s.stop_m;
   s.stop <- true;
   Mutex.unlock s.stop_m;
-  wake_up s;
-  Mutex.lock s.ready_m;
-  List.iter Condition.signal s.queues;
-  Mutex.unlock s.ready_m
+  Mutex.lock s.queues_m;
+  while List.length s.queues > 0 do
+    wake_up s;
+    Mutex.lock s.ready_m;
+    List.iter Condition.signal s.queues;
+    Mutex.unlock s.ready_m;
+    Condition.wait s.queue_stopped_c s.queues_m
+  done;
+  Mutex.unlock s.queues_m
 
 let tmp = Bytes.create 1024
 
@@ -337,7 +344,18 @@ let queue ?log ?(priorities = fun _ -> true) s name =
     end;
     (f [@tailcall]) ()
   in
-  try f () with Queue_stopped -> ()
+  let on_done () =
+    Mutex.lock s.queues_m;
+    s.queues <- List.filter (fun q -> q <> c) s.queues;
+    Condition.signal s.queue_stopped_c;
+    Mutex.unlock s.queues_m
+  in
+  ( try f () with
+    | Queue_stopped -> ()
+    | exn ->
+        on_done ();
+        raise exn );
+  on_done ()
 
 module Async = struct
   (* m is used to make sure that 
