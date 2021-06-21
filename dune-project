@@ -1,4 +1,4 @@
-(lang dune 2.0)
+(lang dune 2.7)
 (version 0.9.1)
 (name duppy)
 (source (github savonet/ocaml-duppy))
@@ -12,6 +12,6 @@
  (name duppy)
  (synopsis "Library providing monadic threads")
  (depends
-  (dune (> 2.0))
+  dune
   pcre)
 )

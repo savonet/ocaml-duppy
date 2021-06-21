@@ -8,11 +8,12 @@ license: "GPL-2.0"
 homepage: "https://github.com/savonet/ocaml-duppy"
 bug-reports: "https://github.com/savonet/ocaml-duppy/issues"
 depends: [
-  "dune" {> "2.0"}
+  "dune" {>= "2.7"}
   "pcre"
+  "odoc" {with-doc}
 ]
 build: [
-  ["dune" "subst"] {pinned}
+  ["dune" "subst"] {dev}
   [
     "dune"
     "build"
