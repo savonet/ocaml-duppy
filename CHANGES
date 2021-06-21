@@ -1,4 +1,4 @@
-0.9.1 (unreleased)
+0.9.1 (06-21-2021)
 =====
 * Make `stop` synchronous, waiting for all tasks to stop
   while sending `Condition.signal`. Should avoid potential
