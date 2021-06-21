@@ -83,7 +83,7 @@ val queue :
   string ->
   unit
 
-(** Stop all queues running on that scheduler, causing them to return. *)
+(** Stop all queues running on that scheduler and wait for them to return. *)
 val stop : 'a scheduler -> unit
 
 (** Core task registration.
