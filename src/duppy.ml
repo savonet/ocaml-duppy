@@ -306,8 +306,14 @@ let queue ?log ?(priorities = fun _ -> true) s name =
     log (Printf.sprintf "There are %d ready tasks." (List.length s.ready));
     if exec s priorities then raise Queue_processed;
     let wake () =
+      let is_ready =
+        Mutex.lock s.ready_m;
+        let is_ready = s.ready <> [] in
+        Mutex.unlock s.ready_m;
+        is_ready
+      in
       (* Wake up other queues if there are remaining tasks *)
-      if s.ready <> [] then begin
+      if is_ready then begin
         Mutex.lock s.queues_m;
         List.iter (fun x -> if x <> c then Condition.signal x) s.queues;
         Mutex.unlock s.queues_m
@@ -319,9 +325,7 @@ let queue ?log ?(priorities = fun _ -> true) s name =
       Mutex.unlock s.ready_m;
       process s log;
       Mutex.unlock s.select_m;
-      Mutex.lock s.ready_m;
       wake ();
-      Mutex.unlock s.ready_m
     end
     else begin
       (* We use s.ready_m mutex here.
