@@ -6,16 +6,10 @@ Please read the COPYING file before using this software.
 
 ## Prerequisites:
 
-- ocaml >= 4.03.0
-
-- findlib >= 1.8.0
-
-- ocaml-pcre >= 7.3.4
-
-- dune >= 2.0
-
-The code may work with earlier versions but these are the one currently
-supported.
+- ocaml
+- findlib
+- ocaml-pcre
+- dune
 
 ## Compilation:
 
