@@ -1,4 +1,4 @@
 B src/**
 S src/**
 B +threads
-PKG pcre
+PKG re

@@ -8,7 +8,7 @@ Please read the COPYING file before using this software.
 
 - ocaml
 - findlib
-- ocaml-pcre
+- ocaml-re
 - dune
 
 ## Compilation:

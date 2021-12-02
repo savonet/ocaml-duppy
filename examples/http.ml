@@ -1,3 +1,5 @@
+module Pcre = Re.Pcre
+
 let non_blocking_queues = ref 3
 let maybe_blocking_queues = ref 1
 let files_path = ref ""
@@ -275,7 +277,7 @@ let cgi_handler process path h request =
           (Filename.quote tr_suffix) (Filename.quote suffix)
       in
       let sanitize s =
-        Pcre.replace ~pat:"-" ~templ:"_" (String.uppercase_ascii s)
+        Pcre.substitute ~rex:(Pcre.regexp "-") ~subst:(fun _ -> "_") (String.uppercase_ascii s)
       in
       let headers =
         List.map (fun (x, y) -> (sanitize x, y)) request.request_headers
@@ -341,7 +343,7 @@ let cgi_handler process path h request =
                       in
                       ignore (Unix.close_process (in_c, out_c));
                       let __pa_duppy_0 =
-                        let headers = Pcre.split ~pat:"\r\n" headers in
+                        let headers = Pcre.split ~rex:(Pcre.regexp "\r\n") headers in
                         parse_headers headers
                       in
                       Duppy.Monad.bind __pa_duppy_0 (fun headers ->
@@ -401,7 +403,7 @@ let handle_request h request =
 
 let parse_request h r =
   try
-    let headers = Pcre.split ~pat:"\r\n" r in
+    let headers = Pcre.split ~rex:(Pcre.regexp "\r\n") r in
     let __pa_duppy_0 =
       match headers with
         | e :: l ->

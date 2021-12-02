@@ -20,6 +20,8 @@
 
  *****************************************************************************)
 
+module Pcre = Re.Pcre
+
 type fd = Unix.file_descr
 
 external poll :
