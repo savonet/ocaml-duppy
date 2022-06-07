@@ -2,7 +2,7 @@
 (version 0.9.2)
 (name duppy)
 (source (github savonet/ocaml-duppy))
-(license GPL-2.0)
+(license LGPL-2.1)
 (authors "Romain Beauxis <toots@rastageeks.org>")
 (maintainers "The Savonet Team <savonet-users@lists.sourceforge.net>")
 
