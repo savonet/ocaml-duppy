@@ -271,8 +271,8 @@ let exec s (priorities : 'a -> bool) =
   try
     let (_, task), remaining = remove (fun (p, _) -> priorities p) s.ready in
     s.ready <- remaining;
-    Mutex.unlock s.ready_m;
     add_t s (task ());
+    Mutex.unlock s.ready_m;
     true
   with Not_found -> false
 
@@ -357,8 +357,9 @@ let queue ?log ?(priorities = fun _ -> true) s name =
   ( try f () with
     | Queue_stopped -> ()
     | exn ->
+        let bt = Printexc.get_raw_backtrace () in
         on_done ();
-        raise exn );
+        Printexc.raise_with_backtrace exn bt );
   on_done ()
 
 module Async = struct
