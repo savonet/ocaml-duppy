@@ -10,7 +10,7 @@ let () =
     incr pnum;
     if !pnum > 1 then (
       Printf.eprintf "Error: too many arguments\n";
-      exit 1 )
+      exit 1)
     else files_path := s
   in
   Arg.parse
@@ -30,7 +30,7 @@ let () =
     arg usage;
   if !files_path = "" then (
     Printf.printf "%s\n" usage;
-    exit 1 )
+    exit 1)
   else ()
 
 type priority = Maybe_blocking | Non_blocking
@@ -186,7 +186,7 @@ let index_uri path index protocol uri =
         let index = Printf.sprintf "%s/%s" uri index in
         if Sys.file_exists (Printf.sprintf "%s/%s" path index) then
           Duppy.Monad.return index
-        else Duppy.Monad.return uri )
+        else Duppy.Monad.return uri)
     else Duppy.Monad.return uri
   with _ -> Duppy.Monad.return uri
 
@@ -226,7 +226,7 @@ let file_request path _ request =
               reply_headers = headers;
               reply_data = File fd;
             }
-        with _ -> Duppy.Monad.raise (error_403 request.request_protocol) )
+        with _ -> Duppy.Monad.raise (error_403 request.request_protocol))
       else Duppy.Monad.raise (error_404 request.request_protocol))
 
 let file_handler = ((fun _ -> Duppy.Monad.return true), file_request !files_path)
@@ -298,7 +298,7 @@ let cgi_handler process path h request =
           if Array.length ret > 0 then
             Duppy.Monad.return
               (Printf.sprintf "%s; extract AUTH_TYPE=%s" env ret.(1))
-          else Duppy.Monad.raise error_500 )
+          else Duppy.Monad.raise error_500)
         else Duppy.Monad.return env
       in
       Duppy.Monad.bind __pa_duppy_0 (fun env ->
@@ -358,7 +358,7 @@ let cgi_handler process path h request =
                                     List.filter
                                       (fun (x, _) -> x <> "Status")
                                       headers )
-                              with _ -> Duppy.Monad.raise error_500 )
+                              with _ -> Duppy.Monad.raise error_500)
                             else Duppy.Monad.return ((200, "OK"), headers)
                           in
                           Duppy.Monad.bind __pa_duppy_0
@@ -516,12 +516,11 @@ let () =
   ignore (Unix.sigprocmask Unix.SIG_BLOCK [Sys.sigpipe]);
   Unix.setsockopt sock Unix.SO_REUSEADDR true;
   let rec incoming _ =
-    ( try
-        let s, _ = Unix.accept sock in
-        handle_client s
-      with e ->
-        Printf.printf "Failed to accept new client: %S\n" (Printexc.to_string e)
-    );
+    (try
+       let s, _ = Unix.accept sock in
+       handle_client s
+     with e ->
+       Printf.printf "Failed to accept new client: %S\n" (Printexc.to_string e));
     [
       {
         Duppy.Task.priority = Non_blocking;
@@ -530,9 +529,9 @@ let () =
       };
     ]
   in
-  ( try Unix.bind sock bind_addr
-    with Unix.Unix_error (Unix.EADDRINUSE, "bind", "") ->
-      failwith (Printf.sprintf "port %d already taken" !port) );
+  (try Unix.bind sock bind_addr
+   with Unix.Unix_error (Unix.EADDRINUSE, "bind", "") ->
+     failwith (Printf.sprintf "port %d already taken" !port));
   Unix.listen sock max_conn;
   Duppy.Task.add scheduler
     {

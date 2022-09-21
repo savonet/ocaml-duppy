@@ -117,19 +117,18 @@ let sock = socket PF_INET SOCK_STREAM 0
 let () =
   setsockopt sock SO_REUSEADDR true;
   let rec incoming _ =
-    ( try
-        let s, caller = accept sock in
-        let ip =
-          let a =
-            match caller with ADDR_INET (a, _) -> a | _ -> assert false
-          in
-          try (gethostbyaddr a).h_name with Not_found -> string_of_inet_addr a
-        in
-        Printf.printf "New client: %s\n" ip;
-        handle_client s
-      with e ->
-        Printf.printf "Failed to accept new client: %S\n" (Printexc.to_string e)
-    );
+    (try
+       let s, caller = accept sock in
+       let ip =
+         let a =
+           match caller with ADDR_INET (a, _) -> a | _ -> assert false
+         in
+         try (gethostbyaddr a).h_name with Not_found -> string_of_inet_addr a
+       in
+       Printf.printf "New client: %s\n" ip;
+       handle_client s
+     with e ->
+       Printf.printf "Failed to accept new client: %S\n" (Printexc.to_string e));
     [
       {
         Duppy.Task.priority = io_priority;
@@ -138,9 +137,9 @@ let () =
       };
     ]
   in
-  ( try bind sock bind_addr
-    with Unix.Unix_error (Unix.EADDRINUSE, "bind", "") ->
-      failwith (Printf.sprintf "port %d already taken" port) );
+  (try bind sock bind_addr
+   with Unix.Unix_error (Unix.EADDRINUSE, "bind", "") ->
+     failwith (Printf.sprintf "port %d already taken" port));
   listen sock max_conn;
   Duppy.Task.add scheduler
     {

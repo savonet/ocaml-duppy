@@ -126,7 +126,8 @@ module Task = struct
       enrich =
         (fun e ->
           List.fold_left
-            (fun e -> function `Delay s -> { e with t = min e.t (t0 +. s) }
+            (fun e -> function
+              | `Delay s -> { e with t = min e.t (t0 +. s) }
               | `Read s -> { e with r = s :: e.r }
               | `Write s -> { e with w = s :: e.w }
               | `Exception s -> { e with x = s :: e.x })
@@ -325,7 +326,7 @@ let queue ?log ?(priorities = fun _ -> true) s name =
       Mutex.unlock s.ready_m;
       process s log;
       Mutex.unlock s.select_m;
-      wake ();
+      wake ()
     end
     else begin
       (* We use s.ready_m mutex here.
@@ -354,12 +355,12 @@ let queue ?log ?(priorities = fun _ -> true) s name =
     Condition.signal s.queue_stopped_c;
     Mutex.unlock s.queues_m
   in
-  ( try f () with
+  (try f () with
     | Queue_stopped -> ()
     | exn ->
         let bt = Printexc.get_raw_backtrace () in
         on_done ();
-        Printexc.raise_with_backtrace exn bt );
+        Printexc.raise_with_backtrace exn bt);
   on_done ()
 
 module Async = struct
@@ -594,7 +595,7 @@ struct
                   [{ priority; events; handler = f }]
               | _ ->
                   exec x;
-                  [] )
+                  [])
         | None -> [{ priority; events; handler = f }]
     in
     (* Catch all exceptions.. *)
@@ -659,12 +660,12 @@ struct
         let n = write pos len in
         if n <= 0 then (
           on_error Io_error;
-          [] )
+          [])
         else if n < len then
           [{ priority; events = [`Write unix_socket]; handler = f (pos + n) }]
         else (
           exec ();
-          [] )
+          [])
       with
         | Unix.Unix_error (Unix.EWOULDBLOCK, _, _) when Sys.os_type = "Win32" ->
             [{ priority; events = [`Write unix_socket]; handler = f pos }]
@@ -819,12 +820,12 @@ module Monad = struct
         if not m.locked then (
           (* I don't think shuffling tasks
            * matters here.. *)
-            match m.tasks with
+          match m.tasks with
             | x :: l ->
                 m.tasks <- l;
                 m.locked <- true;
                 task x :: tasks
-            | _ -> tasks )
+            | _ -> tasks)
         else tasks
 
       let rec handler _ =
