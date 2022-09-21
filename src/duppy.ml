@@ -271,8 +271,8 @@ let exec s (priorities : 'a -> bool) =
   try
     let (_, task), remaining = remove (fun (p, _) -> priorities p) s.ready in
     s.ready <- remaining;
-    add_t s (task ());
     Mutex.unlock s.ready_m;
+    (try add_t s (task ()) with _ -> ());
     true
   with Not_found -> false
 
