@@ -406,8 +406,8 @@ module Async = struct
     try
       begin
         match t.fd with
-        | Some t -> ignore (Unix.write t (Bytes.of_string " ") 0 1)
-        | None -> raise Stopped
+          | Some t -> ignore (Unix.write t (Bytes.of_string " ") 0 1)
+          | None -> raise Stopped
       end;
       Mutex.unlock t.m
     with e ->
@@ -419,10 +419,10 @@ module Async = struct
     try
       begin
         match t.fd with
-        | Some c ->
-            t.stop := true;
-            ignore (Unix.write c (Bytes.of_string " ") 0 1)
-        | None -> raise Stopped
+          | Some c ->
+              t.stop := true;
+              ignore (Unix.write c (Bytes.of_string " ") 0 1)
+          | None -> raise Stopped
       end;
       t.fd <- None;
       Mutex.unlock t.m
