@@ -359,7 +359,7 @@ let queue ?log ?(priorities = fun _ -> true) s name =
     | Queue_stopped -> ()
     | exn ->
         let bt = Printexc.get_raw_backtrace () in
-        on_done ();
+        (try on_done () with _ -> ());
         Printexc.raise_with_backtrace exn bt);
   on_done ()
 
