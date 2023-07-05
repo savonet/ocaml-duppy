@@ -269,13 +269,13 @@ let exec s (priorities : 'a -> bool) =
    * win32 because a thread can double-lock
    * the same mutex.. *)
   if Sys.os_type <> "Win32" then assert (not (Mutex.try_lock s.ready_m));
-  try
-    let (_, task), remaining = remove (fun (p, _) -> priorities p) s.ready in
-    s.ready <- remaining;
-    Mutex.unlock s.ready_m;
-    (try add_t s (task ()) with _ -> ());
-    true
-  with Not_found -> false
+  match remove (fun (p, _) -> priorities p) s.ready with
+    | (_, task), remaining ->
+        s.ready <- remaining;
+        Mutex.unlock s.ready_m;
+        add_t s (task ());
+        true
+    | exception Not_found -> false
 
 exception Queue_stopped
 exception Queue_processed
