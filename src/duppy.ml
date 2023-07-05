@@ -64,6 +64,7 @@ type 'a t = {
 }
 
 type 'a scheduler = {
+  on_error : exn -> Printexc.raw_backtrace -> unit;
   out_pipe : Unix.file_descr;
   in_pipe : Unix.file_descr;
   compare : 'a -> 'a -> int;
@@ -84,9 +85,10 @@ let clear_tasks s =
   s.tasks <- [];
   Mutex.unlock s.tasks_m
 
-let create ?(compare = compare) () =
+let create ?(on_error = Printexc.raise_with_backtrace) ?(compare = compare) () =
   let out_pipe, in_pipe = Unix.pipe () in
   {
+    on_error;
     out_pipe;
     in_pipe;
     compare;
@@ -273,7 +275,15 @@ let exec s (priorities : 'a -> bool) =
     | (_, task), remaining ->
         s.ready <- remaining;
         Mutex.unlock s.ready_m;
-        add_t s (task ());
+        let tasks =
+          match task () with
+            | exception exn ->
+                let bt = Printexc.get_raw_backtrace () in
+                s.on_error exn bt;
+                []
+            | v -> v
+        in
+        add_t s tasks;
         true
     | exception Not_found -> false
 

@@ -61,7 +61,11 @@ type 'a scheduler
 (** Initiate a new scheduler 
   * @param compare the comparison function used to sort tasks according to priorities. 
   * Works as in [List.sort] *)
-val create : ?compare:('a -> 'a -> int) -> unit -> 'a scheduler
+val create :
+  ?on_error:(exn -> Printexc.raw_backtrace -> unit) ->
+  ?compare:('a -> 'a -> int) ->
+  unit ->
+  'a scheduler
 
 (** [queue ~log ~priorities s name] 
  * starts a queue, on the scheduler [s] only processing priorities [p]
