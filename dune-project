@@ -12,6 +12,7 @@
  (name duppy)
  (synopsis "Library providing monadic threads")
  (depends
+  (ocaml (>= 4.07.0))
   dune
   pcre)
 )
