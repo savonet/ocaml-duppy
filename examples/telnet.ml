@@ -5,20 +5,13 @@ let io_priority = Non_blocking
 (* Create scheduler *)
 let scheduler = Duppy.create ()
 
-(* Create two queues,
- * one for non blocking events
- * and another for blocking 
- * events *)
-let new_queue ~priority ~name () =
-  let log = Printf.printf "%s: %s\n%!" name in
+let new_pool ?size ~priority ~name () =
   let priorities p = p = priority in
-  let queue () = Duppy.queue scheduler ~log ~priorities name in
-  Thread.create queue ()
+  Duppy.pool scheduler ~priorities ?size name
 
-let th =
-  ignore (new_queue ~priority:Non_blocking ~name:"Non blocking queue" ());
-  ignore (new_queue ~priority:Maybe_blocking ~name:"Maybe blocking queue #1" ());
-  new_queue ~priority:Maybe_blocking ~name:"Maybe blocking queue #2" ()
+let create_pools () =
+  new_pool ~priority:Non_blocking ~name:"Non blocking queue" ();
+  new_pool ~size:2 ~priority:Maybe_blocking ~name:"Maybe blocking queue" ()
 
 let exec_command s () =
   let chan = Unix.open_process_in s in
@@ -147,4 +140,9 @@ let () =
       Duppy.Task.events = [`Read sock];
       Duppy.Task.handler = incoming;
     };
-  Thread.join th
+  Sys.set_signal Sys.sigint
+    (Sys.Signal_handle
+       (fun _ ->
+         Duppy.stop scheduler;
+         exit 0));
+  Duppy.wait scheduler
