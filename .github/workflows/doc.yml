@@ -22,7 +22,7 @@ jobs:
           ocaml-compiler: 5.1
 
       - name: Install locally
-        run: opam install . --deps-only --with-test
+        run: opam install . --deps-only --with-doc
 
       - name: Build documentation
         run: opam exec -- dune build @doc
