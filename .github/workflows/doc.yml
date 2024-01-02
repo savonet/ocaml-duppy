@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Use OCaml ${{ matrix.ocaml-compiler }}
+        uses: ocaml/setup-ocaml@v2
+        with:
+          ocaml-compiler: 5.1
+
+      - name: Install locally
+        run: opam install . --deps-only --with-test
+
+      - name: Build documentation
+        run: opam exec -- dune build @doc
+
+      - name: Set-up Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v2
+        with:
+          path: _build/default/_doc/_html
+
+      - name: Deploy odoc to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v3
