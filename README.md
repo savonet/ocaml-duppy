@@ -4,6 +4,10 @@ ocaml-duppy is an advanced scheduler for Ocaml programmers.
 
 Please read the COPYING file before using this software.
 
+## Documentation
+
+The API is documented here: https://www.liquidsoap.info/ocaml-duppy/
+
 ## Prerequisites:
 
 - ocaml
