@@ -1,6 +1,15 @@
 name: CI
 
-on: [push]
+on:
+  merge_group:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -9,17 +18,26 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         ocaml-compiler:
-          - 4.08.x
+          - 4.14
+          - 5.1
+        include:
+          - ocaml-compiler: 5.1
+            os: ubuntu-latest
+            upload-doc: true
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
+
       - name: Use OCaml ${{ matrix.ocaml-compiler }}
         uses: ocaml/setup-ocaml@v2
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
+
       - name: Install locally
         run: opam install . --deps-only --with-test
+
       - name: Build locally
         run: opam exec -- dune build
+
       - name: Run tests locally
         run: opam exec -- dune runtest
