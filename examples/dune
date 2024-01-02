@@ -4,13 +4,6 @@
  (libraries duppy))
 
 (executable
- (name http_domain)
- (modules http_domain)
- (enabled_if
-  (<= 5.0.0 %{ocaml_version}))
- (libraries duppy))
-
-(executable
  (name telnet)
  (modules telnet)
  (libraries duppy))
