@@ -1,7 +1,7 @@
 (library
  (name duppy)
  (public_name duppy)
- (libraries unix threads re)
+ (libraries unix threads poll re)
  (foreign_stubs
   (language c)
   (names duppy_stubs))

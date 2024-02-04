@@ -67,14 +67,12 @@ val create :
   unit ->
   'a scheduler
 
-(** Internal polling function. Uses `Unix.select` on windows and
-    `poll` otherwise. *)
+(** Internal polling function. Uses the `poll` package internally. *)
 val poll :
   Unix.file_descr list ->
   Unix.file_descr list ->
-  Unix.file_descr list ->
   float ->
-  Unix.file_descr list * Unix.file_descr list * Unix.file_descr list
+  Unix.file_descr list * Unix.file_descr list
 
 (** [queue ~log ~priorities s name] 
  * starts a queue, on the scheduler [s] only processing priorities [p]
@@ -122,10 +120,7 @@ module Task : sig
     * Please not that currently, under win32, all socket used in ocaml-duppy 
     * are expected to be in blocking mode only! *)
   type event =
-    [ `Delay of float
-    | `Write of Unix.file_descr
-    | `Read of Unix.file_descr
-    | `Exception of Unix.file_descr ]
+    [ `Delay of float | `Write of Unix.file_descr | `Read of Unix.file_descr ]
 
   (** Schedule a task. *)
   val add : 'a scheduler -> ('a, [< event ]) task -> unit

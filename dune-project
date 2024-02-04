@@ -1,5 +1,5 @@
 (lang dune 2.7)
-(version 0.9.3)
+(version 0.10.0)
 (name duppy)
 (source (github savonet/ocaml-duppy))
 (license LGPL-2.1-only)
@@ -14,5 +14,6 @@
  (depends
   (ocaml (>= 4.07.0))
   dune
+  poll
   re)
 )
