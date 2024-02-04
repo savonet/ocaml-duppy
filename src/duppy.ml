@@ -37,8 +37,15 @@ let poll r w timeout =
           Poll.Timeout.after timeout
   in
   let poll = Poll.create () in
-  List.iter (fun fd -> Poll.set poll fd Poll.Event.read) r;
-  List.iter (fun fd -> Poll.set poll fd Poll.Event.write) w;
+  let read_write, read = List.partition (fun fd -> List.mem fd w) r in
+  let write_read, write =
+    List.partition (fun fd -> List.mem fd r && not (List.mem fd read_write)) w
+  in
+  List.iter (fun fd -> Poll.set poll fd Poll.Event.read) read;
+  List.iter (fun fd -> Poll.set poll fd Poll.Event.write) write;
+  List.iter
+    (fun fd -> Poll.set poll fd Poll.Event.read_write)
+    (read_write @ write_read);
   ignore (Poll.wait poll timeout);
   let r = ref [] in
   let w = ref [] in
