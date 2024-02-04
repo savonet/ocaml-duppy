@@ -24,28 +24,30 @@ module Pcre = Re.Pcre
 
 type fd = Unix.file_descr
 
-let poll r w timeout =
-  let timeout =
-    match timeout with
-      | x when x < 0. -> Poll.Timeout.never
-      | 0. -> Poll.Timeout.immediate
-      | x ->
-          let frac, int = modf x in
-          let int = Int64.mul (Int64.of_float int) 1_000_000_000L in
-          let frac = Int64.of_float (frac *. 1_000_000_000.) in
-          let timeout = Int64.add int frac in
-          Poll.Timeout.after timeout
-  in
+let poll =
   let poll = Poll.create () in
-  List.iter (fun fd -> Poll.set poll fd Poll.Event.read) r;
-  List.iter (fun fd -> Poll.set poll fd Poll.Event.write) w;
-  ignore (Poll.wait poll timeout);
-  let r = ref [] in
-  let w = ref [] in
-  Poll.iter_ready poll ~f:(fun fd event ->
-      if event.Poll.Event.readable then r := fd :: !r;
-      if event.Poll.Event.writable then w := fd :: !w);
-  (!r, !w)
+  fun r w timeout ->
+    let timeout =
+      match timeout with
+        | x when x < 0. -> Poll.Timeout.never
+        | 0. -> Poll.Timeout.immediate
+        | x ->
+            let frac, int = modf x in
+            let int = Int64.mul (Int64.of_float int) 1_000_000_000L in
+            let frac = Int64.of_float (frac *. 1_000_000_000.) in
+            let timeout = Int64.add int frac in
+            Poll.Timeout.after timeout
+    in
+    Poll.clear poll;
+    List.iter (fun fd -> Poll.set poll fd Poll.Event.read) r;
+    List.iter (fun fd -> Poll.set poll fd Poll.Event.write) w;
+    ignore (Poll.wait poll timeout);
+    let r = ref [] in
+    let w = ref [] in
+    Poll.iter_ready poll ~f:(fun fd event ->
+        if event.Poll.Event.readable then r := fd :: !r;
+        if event.Poll.Event.writable then w := fd :: !w);
+    (!r, !w)
 
 (** [remove f l] is like [List.find f l] but also returns the result of removing
   * the found element from the original list. *)
