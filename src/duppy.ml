@@ -39,17 +39,12 @@ let poll r w timeout =
   let poll = Poll.create () in
   List.iter (fun fd -> Poll.set poll fd Poll.Event.read) r;
   List.iter (fun fd -> Poll.set poll fd Poll.Event.write) w;
-  match Poll.wait poll timeout with
-    | `Ok ->
-        let r = ref [] in
-        let w = ref [] in
-        Poll.iter_ready poll ~f:(fun fd -> function
-          | { Poll.Event.readable = true; _ } -> r := fd :: !r
-          | _ -> w := fd :: !w);
-        let r = !r in
-        let w = !w in
-        (r, w)
-    | `Timeout -> ([], [])
+  ignore (Poll.wait poll timeout);
+  let r = ref [] in
+  let w = ref [] in
+  Poll.iter_ready poll ~f:(fun fd -> function
+    | { Poll.Event.readable = true; _ } -> r := fd :: !r | _ -> w := fd :: !w);
+  (!r, !w)
 
 (** [remove f l] is like [List.find f l] but also returns the result of removing
   * the found element from the original list. *)
