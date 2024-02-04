@@ -29,12 +29,7 @@ let poll r w timeout =
     match timeout with
       | x when x < 0. -> Poll.Timeout.never
       | 0. -> Poll.Timeout.immediate
-      | x ->
-          let frac, int = modf x in
-          let int = Int64.mul (Int64.of_float int) 1_000_000_000L in
-          let frac = Int64.of_float (frac *. 1_000_000_000.) in
-          let timeout = Int64.add int frac in
-          Poll.Timeout.after timeout
+      | x -> Poll.Timeout.after (Int64.of_float (x *. 1_000_000_000.))
   in
   let poll = Poll.create () in
   List.iter (fun fd -> Poll.set poll fd Poll.Event.read) r;
