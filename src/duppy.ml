@@ -24,25 +24,27 @@ module Pcre = Re.Pcre
 
 type fd = Unix.file_descr
 
-external poll :
-  Unix.file_descr array ->
-  Unix.file_descr array ->
-  Unix.file_descr array ->
-  float ->
-  Unix.file_descr array * Unix.file_descr array * Unix.file_descr array
-  = "caml_poll"
-
-let poll r w e timeout =
-  let r = Array.of_list r in
-  let w = Array.of_list w in
-  let e = Array.of_list e in
-  let r, w, e = poll r w e timeout in
-  (Array.to_list r, Array.to_list w, Array.to_list e)
-
-let select, select_fname =
-  match Sys.os_type with
-    | "Unix" -> (poll, "poll")
-    | _ -> (Unix.select, "select")
+let poll r w timeout =
+  let timeout =
+    match timeout with
+      | x when x < 0. -> Poll.Timeout.never
+      | 0. -> Poll.Timeout.immediate
+      | x -> Poll.Timeout.after (Int64.of_float (x *. 1_000_000_000.))
+  in
+  let poll = Poll.create () in
+  List.iter (fun fd -> Poll.set poll fd Poll.Event.read) r;
+  List.iter (fun fd -> Poll.set poll fd Poll.Event.write) w;
+  match Poll.wait poll timeout with
+    | `Ok ->
+        let r = ref [] in
+        let w = ref [] in
+        Poll.iter_ready poll ~f:(fun fd -> function
+          | { Poll.Event.readable = true; _ } -> r := fd :: !r
+          | _ -> w := fd :: !w);
+        let r = !r in
+        let w = !w in
+        (r, w)
+    | `Timeout -> ([], [])
 
 (** [remove f l] is like [List.find f l] but also returns the result of removing
   * the found element from the original list. *)
@@ -56,7 +58,7 @@ let remove f l =
 (** Events and tasks from the implementation point-of-view:
   * we have to hide the 'a parameter. *)
 
-type e = { r : fd list; w : fd list; x : fd list; t : float }
+type e = { r : fd list; w : fd list; t : float }
 
 type 'a t = {
   timestamp : float;
@@ -111,8 +113,7 @@ let wake_up s = ignore (Unix.write s.in_pipe (Bytes.of_string "x") 0 1)
 module Task = struct
   (** Events and tasks from the user's point-of-view. *)
 
-  type event =
-    [ `Delay of float | `Write of fd | `Read of fd | `Exception of fd ]
+  type event = [ `Delay of float | `Write of fd | `Read of fd ]
 
   type ('a, 'b) task = {
     priority : 'a;
@@ -133,8 +134,7 @@ module Task = struct
             (fun e -> function
               | `Delay s -> { e with t = min e.t (t0 +. s) }
               | `Read s -> { e with r = s :: e.r }
-              | `Write s -> { e with w = s :: e.w }
-              | `Exception s -> { e with x = s :: e.x })
+              | `Write s -> { e with w = s :: e.w })
             e task.events);
       is_ready =
         (fun e ->
@@ -145,7 +145,6 @@ module Task = struct
                   | `Delay s when time () > t0 +. s -> true
                   | `Read s when List.mem s e.r -> true
                   | `Write s when List.mem s e.w -> true
-                  | `Exception s when List.mem s e.x -> true
                   | _ -> false)
               task.events
           in
@@ -155,7 +154,7 @@ module Task = struct
 
   let add_t s items =
     let f item =
-      match item.is_ready { r = []; w = []; x = []; t = 0. } with
+      match item.is_ready { r = []; w = []; t = 0. } with
         | Some f ->
             Mutex.lock s.ready_m;
             s.ready <- (item.prio, f) :: s.ready;
@@ -198,30 +197,29 @@ let process s log =
   let e =
     List.fold_left
       (fun e t -> t.enrich e)
-      { r = [s.out_pipe]; w = []; x = []; t = infinity }
+      { r = [s.out_pipe]; w = []; t = infinity }
       s.tasks
   in
   (* Poll for an event. *)
-  let r, w, x =
+  let r, w =
     let rec f () =
       try
         let timeout = if e.t = infinity then -1. else max 0. (e.t -. time ()) in
         log
-          (Printf.sprintf "Enter %s at %f, timeout %f (%d/%d/%d)." select_fname
-             (time ()) timeout (List.length e.r) (List.length e.w)
-             (List.length e.x));
-        let r, w, x = select e.r e.w e.x timeout in
+          (Printf.sprintf "Enter poll at %f, timeout %f (%d/%d)." (time ())
+             timeout (List.length e.r) (List.length e.w));
+        let r, w = poll e.r e.w timeout in
         log
-          (Printf.sprintf "Left %s at %f (%d/%d/%d)." select_fname (time ())
-             (List.length r) (List.length w) (List.length x));
-        (r, w, x)
+          (Printf.sprintf "Left poll at %f (%d/%d)." (time ()) (List.length r)
+             (List.length w));
+        (r, w)
       with
         | Unix.Unix_error (Unix.EINTR, _, _) ->
             (* [EINTR] means that select was interrupted by 
              * a signal before any of the selected events 
              * occurred and before the timeout interval expired.
              * We catch it and restart.. *)
-            log (Printf.sprintf "Select interrupted at %f." (time ()));
+            log (Printf.sprintf "Poll interrupted at %f." (time ()));
             f ()
         | e ->
             (* Uncaught exception: 
@@ -244,7 +242,7 @@ let process s log =
       ignore (Unix.read s.out_pipe tmp 0 1024)
   in
   (* Move ready tasks to the ready list. *)
-  let e = { r; w; x; t = 0. } in
+  let e = { r; w; t = 0. } in
   Mutex.lock s.tasks_m;
   (* Split [tasks] into [r]eady and still [w]aiting. *)
   let r, w =

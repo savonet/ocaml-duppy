@@ -1,3 +1,7 @@
+0.10.0 (unreleased)
+======
+* Switch to `poll` for polling implementation.
+
 0.9.3 (2023-07-06)
 ======
 * Make sure sure `ready_m` is release last to prevent any exception raised
