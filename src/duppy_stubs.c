@@ -128,7 +128,7 @@ CAMLprim value caml_poll(value _read, value _write, value _err, value _timeout) 
       nwrite++;
     }
     if (fds[n].revents & POLLERR) {
-      Store_field(_pread, nerr, Val_fd(fds[n].fd));
+      Store_field(_perr, nerr, Val_fd(fds[n].fd));
       nerr++;
     }
   }
