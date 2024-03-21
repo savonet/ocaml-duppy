@@ -1,6 +1,7 @@
 1.0.0 (unreleased)
 =====
 * Convert to domain/lock-free concurrency.
+* Switch to `poll` for polling implementation.
 
 0.9.4 (2024-03-18)
 =====

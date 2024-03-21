@@ -47,36 +47,29 @@ end
 
 type fd = Unix.file_descr
 
-external poll :
-  Unix.file_descr array ->
-  Unix.file_descr array ->
-  Unix.file_descr array ->
-  float ->
-  Unix.file_descr array * Unix.file_descr array * Unix.file_descr array
-  = "caml_poll"
-
-let poll r w e timeout =
-  let r = Array.of_list r in
-  let w = Array.of_list w in
-  let e = Array.of_list e in
-  let r, w, e = poll r w e timeout in
-  (Array.to_list r, Array.to_list w, Array.to_list e)
-
-let select, select_fname =
-  match Sys.os_type with
-    | "Unix" -> (poll, "poll")
-    | _ -> (Unix.select, "select")
-
 (** Events and tasks from the implementation point-of-view:
   * we have to hide the 'a parameter. *)
 
-type e = { r : fd list; w : fd list; x : fd list; t : float }
+module Events = struct
+  module Map = Map.Make (struct
+    type t = fd
+
+    let compare = Stdlib.compare
+  end)
+
+  include Map
+
+  type elt = fd * Poll.Event.t
+  type 'a map = 'a t
+  type t = Poll.Event.t map
+end
+
+type e = { events : Events.t; timeout : Poll.Timeout.t }
 
 type 'a t = {
-  timestamp : float;
   prio : 'a;
   enrich : e -> e;
-  is_ready : e -> (unit -> 'a t list) option;
+  is_ready : Events.elt list -> (unit -> 'a t list) option;
 }
 
 type 'a scheduler = {
@@ -84,13 +77,14 @@ type 'a scheduler = {
   out_pipe : Unix.file_descr;
   in_pipe : Unix.file_descr;
   compare : 'a -> 'a -> int;
+  poll : Poll.t;
   pools : (('a -> bool) * Pool.t) Queue.t;
   tasks : 'a t Queue.t;
   log : string -> unit;
-  main_locked : bool Atomic.t;
   stopped : bool Atomic.t;
   stop_p : unit Future.promise;
   stop_f : unit Future.t;
+  thread_id : Thread.t;
 }
 
 let clear_tasks =
@@ -105,8 +99,16 @@ let clear_tasks =
 exception Found of Pool.t
 exception Unhandled_priority
 
+let wake_up s = ignore (Unix.write_substring s.in_pipe "x" 0 1)
+
 let push_task s (priority, task) =
-  let task () = List.iter (Queue.push s.tasks) (task ()) in
+  let task () =
+    match task () with
+      | [] -> ()
+      | l ->
+          List.iter (Queue.push s.tasks) l;
+          wake_up s
+  in
   try
     Queue.iter
       (fun (accept, pool) -> if accept priority then raise (Found pool))
@@ -114,13 +116,10 @@ let push_task s (priority, task) =
     raise Unhandled_priority
   with Found pool -> Pool.run_async pool task
 
-let wake_up s = ignore (Unix.write_substring s.in_pipe "x" 0 1)
-
 module Task = struct
   (** Events and tasks from the user's point-of-view. *)
 
-  type event =
-    [ `Delay of float | `Write of fd | `Read of fd | `Exception of fd ]
+  type event = [ `Delay of float | `Write of fd | `Read of fd ]
 
   type ('a, 'b) task = {
     priority : 'a;
@@ -130,30 +129,56 @@ module Task = struct
 
   let time () = Unix.gettimeofday ()
 
+  let add_event fd event events =
+    let e = Option.value ~default:Poll.Event.none (Events.find_opt fd events) in
+    let e =
+      match event with
+        | `Read -> { e with Poll.Event.readable = true }
+        | `Write -> { e with Poll.Event.writable = true }
+    in
+    Events.add fd e events
+
+  let set_timeout ~current timeout =
+    match (current, timeout) with
+      | Poll.Timeout.Immediate, _ | _, Poll.Timeout.Immediate ->
+          Poll.Timeout.Immediate
+      | Poll.Timeout.Never, t | t, Poll.Timeout.Never -> t
+      | Poll.Timeout.After v, Poll.Timeout.After v' ->
+          Poll.Timeout.After (Int64.min v v')
+
   let rec t_of_task (task : ('a, [< event ]) task) =
     let t0 = time () in
     {
-      timestamp = t0;
       prio = task.priority;
       enrich =
         (fun e ->
           List.fold_left
             (fun e -> function
-              | `Delay s -> { e with t = min e.t (t0 +. s) }
-              | `Read s -> { e with r = s :: e.r }
-              | `Write s -> { e with w = s :: e.w }
-              | `Exception s -> { e with x = s :: e.x })
+              | `Delay s ->
+                  {
+                    e with
+                    timeout =
+                      set_timeout ~current:e.timeout
+                        (Poll.Timeout.after (Int64.of_float (s *. 1000.)));
+                  }
+              | `Read s -> { e with events = add_event s `Read e.events }
+              | `Write s -> { e with events = add_event s `Write e.events })
             e task.events);
       is_ready =
-        (fun e ->
+        (fun events ->
           let l =
             List.filter
               (fun evt ->
                 match (evt :> event) with
                   | `Delay s when time () > t0 +. s -> true
-                  | `Read s when List.mem s e.r -> true
-                  | `Write s when List.mem s e.w -> true
-                  | `Exception s when List.mem s e.x -> true
+                  | `Read s ->
+                      List.exists
+                        (fun (fd, event) -> fd = s && event.Poll.Event.readable)
+                        events
+                  | `Write s ->
+                      List.exists
+                        (fun (fd, event) -> fd = s && event.Poll.Event.writable)
+                        events
                   | _ -> false)
               task.events
           in
@@ -163,7 +188,7 @@ module Task = struct
 
   let add_t s items =
     let f item =
-      match item.is_ready { r = []; w = []; x = []; t = 0. } with
+      match item.is_ready [] with
         | Some f -> push_task s (item.prio, f)
         | None -> Queue.push s.tasks item
     in
@@ -176,63 +201,60 @@ end
 open Task
 
 let stop s =
-  if not (Atomic.exchange s.stopped true) then (
-    Atomic.set s.stopped true;
+  if Atomic.compare_and_set s.stopped false true then (
     wake_up s;
+    Thread.join s.thread_id;
     Queue.iter (fun (_, p) -> Pool.shutdown p) s.pools;
     Future.fulfill s.stop_p (Result.Ok ()))
 
 let wait s = Future.wait_block_exn s.stop_f
 
-(** There should be only one call of #process at a time.
-  * Process waits for tasks to become ready, and moves ready tasks
-  * to the ready queue. *)
+let float_of_timeout = function
+  | Poll.Timeout.Immediate -> 0.
+  | Poll.Timeout.Never -> -1.
+  | Poll.Timeout.After v -> Int64.to_float v /. 1000.
+
 let process s =
   let tmp = Bytes.create 1024 in
   (* Compute the union of all events. *)
   let e =
     List.fold_left
       (fun e t -> t.enrich e)
-      { r = [s.out_pipe]; w = []; x = []; t = infinity }
+      {
+        events = Events.add s.out_pipe Poll.Event.read Events.empty;
+        timeout = Poll.Timeout.Never;
+      }
       (Queue.elements s.tasks)
   in
   (* Poll for an event. *)
-  let r, w, x =
-    let rec f () =
-      try
-        let timeout = if e.t = infinity then -1. else max 0. (e.t -. time ()) in
-        s.log
-          (Printf.sprintf "Enter %s at %f, timeout %f (%d/%d/%d)." select_fname
-             (time ()) timeout (List.length e.r) (List.length e.w)
-             (List.length e.x));
-        let r, w, x = select e.r e.w e.x timeout in
-        s.log
-          (Printf.sprintf "Left %s at %f (%d/%d/%d)." select_fname (time ())
-             (List.length r) (List.length w) (List.length x));
-        (r, w, x)
-      with
-        | Unix.Unix_error (Unix.EINTR, _, _) ->
-            (* [EINTR] means that select was interrupted by 
-             * a signal before any of the selected events 
-             * occurred and before the timeout interval expired.
-             * We catch it and restart.. *)
-            s.log
-              (Printf.sprintf "%s interrupted at %f." select_fname (time ()));
-            f ()
-        | e ->
-            let bt = Printexc.get_raw_backtrace () in
-            (* Uncaught exception: 
-             * 1) Discards all tasks currently in the loop (we do not know which 
-             *    socket caused an error).
-             * 2) Re-Raise e *)
-            clear_tasks s;
-            Printexc.raise_with_backtrace e bt
-    in
-    f ()
+  Events.iter (fun fd event -> Poll.set s.poll fd event) e.events;
+  let events_ready =
+    try
+      s.log
+        (Printf.sprintf "Enter poll at %f, timeout %f (%d events)." (time ())
+           (float_of_timeout e.timeout)
+           (Events.cardinal e.events));
+      let res = Poll.wait s.poll e.timeout in
+      let events = ref [] in
+      Poll.iter_ready s.poll ~f:(fun fd event ->
+          events := (fd, event) :: !events);
+      Poll.clear s.poll;
+      s.log
+        (Printf.sprintf "Left poll at %f (%d events, timeout: %b)." (time ())
+           (List.length !events) (res = `Timeout));
+      !events
+    with exn ->
+      let bt = Printexc.get_raw_backtrace () in
+      (* Uncaught exception: 
+       * 1) Discards all tasks currently in the loop (we do not know which 
+       *    socket caused an error).
+       * 2) Re-Raise e *)
+      clear_tasks s;
+      Printexc.raise_with_backtrace exn bt
   in
   (* Empty the wake_up pipe if needed. *)
   let () =
-    if List.mem s.out_pipe r then
+    if List.exists (fun (fd, _) -> fd = s.out_pipe) events_ready then
       (* For safety, we may absorb more than
        * one write. This avoids bad situation
        * when exceesive wake_up may fill up the
@@ -241,13 +263,12 @@ let process s =
       ignore (Unix.read s.out_pipe tmp 0 1024)
   in
   (* Move ready tasks to the ready list. *)
-  let e = { r; w; x; t = 0. } in
   (* Split [tasks] into [r]eady and still [w]aiting. *)
   let r, w =
     let rec process r w =
       try
         let t = Queue.pop s.tasks in
-        match t.is_ready e with
+        match t.is_ready events_ready with
           | Some f -> process ((t.prio, f) :: r) w
           | None -> process r (t :: w)
       with Queue.Empty -> (r, w)
@@ -257,23 +278,14 @@ let process s =
   List.iter (Queue.push s.tasks) w;
   List.iter (push_task s) r
 
-let rec check_main_task ~pool s =
-  if
-    (not (Atomic.get s.stopped))
-    && Pool.num_tasks pool = 0
-    && not (Atomic.exchange s.main_locked true)
-  then (
-    process s;
-    Atomic.set s.main_locked false;
-    check_main_task ~pool s)
-
 (** Create a pool. *)
 let pool ?(priorities = fun _ -> true) ?size s name =
   let before pool =
     s.log
-      (Printf.sprintf "%s: There are %d ready tasks." name (Pool.num_tasks pool))
+      (Printf.sprintf "%s: Processing new task. Remaining tasks: %d" name
+         (Pool.num_tasks pool))
   in
-  let after pool _ = check_main_task ~pool s in
+  let after _ () = s.log (Printf.sprintf "%s: Done processing task" name) in
   let on_init_thread ~dom_id ~t_id () =
     s.log
       (Printf.sprintf "Queue %s (id: %d) starting on domain %d.." name t_id
@@ -288,8 +300,6 @@ let pool ?(priorities = fun _ -> true) ?size s name =
     Pool.create ~on_init_thread ~on_exit_thread ~around_task:(before, after)
       ?num_threads:size ()
   in
-  (* Dummy task to start handling main if needed. *)
-  Pool.run_async pool (fun () -> ());
   Queue.push s.pools (priorities, pool)
 
 let create ?log ?(on_error = Printexc.raise_with_backtrace) ?(compare = compare)
@@ -301,19 +311,28 @@ let create ?log ?(on_error = Printexc.raise_with_backtrace) ?(compare = compare)
   in
   let out_pipe, in_pipe = Unix.pipe () in
   let stop_f, stop_p = Future.make () in
-  {
-    on_error;
-    out_pipe;
-    in_pipe;
-    compare;
-    log;
-    pools = Queue.create ();
-    tasks = Queue.create ();
-    main_locked = Atomic.make false;
-    stopped = Atomic.make false;
-    stop_p;
-    stop_f;
-  }
+  let stopped = Atomic.make false in
+  let s =
+    {
+      on_error;
+      out_pipe;
+      in_pipe;
+      compare;
+      log;
+      poll = Poll.create ();
+      pools = Queue.create ();
+      tasks = Queue.create ();
+      stopped;
+      stop_p;
+      stop_f;
+      thread_id = Thread.self ();
+    }
+  in
+  let rec p () =
+    process s;
+    if not (Atomic.get stopped) then p ()
+  in
+  { s with thread_id = Thread.create p () }
 
 module Async = struct
   (* m is used to make sure that 
