@@ -10,7 +10,6 @@ bug-reports: "https://github.com/savonet/ocaml-duppy/issues"
 depends: [
   "ocaml" {>= "4.07.0"}
   "dune" {>= "2.7"}
-  "poll"
   "moonpool"
   "saturn_lockfree" {>= "0.4.1"}
   "re"

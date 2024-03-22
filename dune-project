@@ -14,7 +14,6 @@
  (depends
   (ocaml (>= 4.07.0))
   dune
-  poll
   moonpool
   (saturn_lockfree (>= 0.4.1))
   re)

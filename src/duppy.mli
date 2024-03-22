@@ -114,7 +114,10 @@ module Task : sig
     * Please not that currently, under win32, all socket used in ocaml-duppy 
     * are expected to be in blocking mode only! *)
   type event =
-    [ `Delay of float | `Write of Unix.file_descr | `Read of Unix.file_descr ]
+    [ `Delay of float
+    | `Write of Unix.file_descr
+    | `Read of Unix.file_descr
+    | `Exception of Unix.file_descr ]
 
   (** Schedule a task. *)
   val add : 'a scheduler -> ('a, [< event ]) task -> unit

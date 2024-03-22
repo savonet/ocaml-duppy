@@ -1,7 +1,7 @@
 (library
  (name duppy)
  (public_name duppy)
- (libraries poll unix moonpool saturn_lockfree re)
+ (libraries unix moonpool saturn_lockfree re)
  (foreign_stubs
   (language c)
   (names duppy_stubs))
