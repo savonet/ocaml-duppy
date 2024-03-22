@@ -126,7 +126,11 @@ module Task = struct
   (** Events and tasks from the user's point-of-view. *)
 
   type event =
-    [ `Delay of float | `Write of fd | `Read of fd | `Exception of fd ]
+    [ `Delay of float
+    | `Delay_interval of float * float
+    | `Write of fd
+    | `Read of fd
+    | `Exception of fd ]
 
   type ('a, 'b) task = {
     priority : 'a;
@@ -146,6 +150,10 @@ module Task = struct
           List.fold_left
             (fun e -> function
               | `Delay s -> { e with t = min e.t (t0 +. s) }
+              (* For delay interval, we try to wake up at the [_max] value and mark the
+                 task ready if we are worken up at any time between [_min] and _[max] *)
+              | `Delay_interval (_min, _max) ->
+                  { e with t = min e.t (t0 +. _max) }
               | `Read s -> { e with r = s :: e.r }
               | `Write s -> { e with w = s :: e.w }
               | `Exception s -> { e with x = s :: e.x })
@@ -156,11 +164,10 @@ module Task = struct
             List.filter
               (fun evt ->
                 match (evt :> event) with
-                  | `Delay s when time () > t0 +. s -> true
-                  | `Read s when List.mem s e.r -> true
-                  | `Write s when List.mem s e.w -> true
-                  | `Exception s when List.mem s e.x -> true
-                  | _ -> false)
+                  | `Delay s | `Delay_interval (s, _) -> time () > t0 +. s
+                  | `Read s -> List.mem s e.r
+                  | `Write s -> List.mem s e.w
+                  | `Exception s -> List.mem s e.x)
               task.events
           in
           if l = [] then None

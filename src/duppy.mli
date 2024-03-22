@@ -115,6 +115,7 @@ module Task : sig
     * are expected to be in blocking mode only! *)
   type event =
     [ `Delay of float
+    | `Delay_interval of (float * float)
     | `Write of Unix.file_descr
     | `Read of Unix.file_descr
     | `Exception of Unix.file_descr ]
