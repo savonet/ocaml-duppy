@@ -62,42 +62,34 @@ type 'a scheduler
   * @param compare the comparison function used to sort tasks according to priorities. 
   * Works as in [List.sort] *)
 val create :
+  ?log:(string -> unit) ->
   ?on_error:(exn -> Printexc.raw_backtrace -> unit) ->
   ?compare:('a -> 'a -> int) ->
   unit ->
   'a scheduler
 
-(** Internal polling function. Uses `Unix.select` on windows and
-    `poll` otherwise. *)
-val poll :
-  Unix.file_descr list ->
-  Unix.file_descr list ->
-  Unix.file_descr list ->
-  float ->
-  Unix.file_descr list * Unix.file_descr list * Unix.file_descr list
-
-(** [queue ~log ~priorities s name] 
- * starts a queue, on the scheduler [s] only processing priorities [p]
- * for which [priorities p] returns [true].
+(** [pool ~log ~priorities ~size s name] 
+ * Create a pool of thread to process tasks.
  *
- * Several queues can be run concurrently against [s]. 
+ * Several pools can be run concurrently against [s]. 
  * @param log Logging function. Default: [Printf.printf "queue %s: %s\n" name]
- * @param priorities Predicate specifying which priority to process. Default: [fun _ -> _ -> true]
+ * @param priorities Predicate specifying which priority to process. Default: [fun _ -> true]
+ *                   When a new task is available for processing, it is sent to the first
+ *                   pool that accepts its priority.
  *
  * An exception is raised from this call when duppy's event loops has
  * crashed. This exception should be considered a MAJOR FAILURE. All current 
  * non-ready tasks registered for the calling scheduler are dropped. You may
  * restart Duppy's queues after it is raised but it should only be used to terminate
  * the process diligently!! *)
-val queue :
-  ?log:(string -> unit) ->
-  ?priorities:('a -> bool) ->
-  'a scheduler ->
-  string ->
-  unit
+val pool :
+  ?priorities:('a -> bool) -> ?size:int -> 'a scheduler -> string -> unit
 
 (** Stop all queues running on that scheduler and wait for them to return. *)
 val stop : 'a scheduler -> unit
+
+(** Wait for scheduler to stop. *)
+val wait : 'a scheduler -> unit
 
 (** Core task registration.
   *
@@ -123,6 +115,7 @@ module Task : sig
     * are expected to be in blocking mode only! *)
   type event =
     [ `Delay of float
+    | `Delay_interval of (float * float)
     | `Write of Unix.file_descr
     | `Read of Unix.file_descr
     | `Exception of Unix.file_descr ]

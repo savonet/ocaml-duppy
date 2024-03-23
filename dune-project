@@ -1,5 +1,5 @@
 (lang dune 2.7)
-(version 0.9.4)
+(version 1.0.0)
 (name duppy)
 (source (github savonet/ocaml-duppy))
 (license LGPL-2.1-only)
@@ -14,5 +14,7 @@
  (depends
   (ocaml (>= 4.07.0))
   dune
+  moonpool
+  (saturn_lockfree (>= 0.4.1))
   re)
 )

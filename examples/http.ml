@@ -1,7 +1,6 @@
 module Pcre = Re.Pcre
 
-let non_blocking_queues = ref 3
-let maybe_blocking_queues = ref 1
+let queues = ref None
 let files_path = ref ""
 let port = ref 8080
 let usage = "usage: http [options] /path/to/files"
@@ -17,14 +16,10 @@ let () =
   in
   Arg.parse
     [
-      ( "--non_blocking_queues",
-        Arg.Int (fun i -> non_blocking_queues := i),
-        Printf.sprintf "Number of non-blocking queues. (default: %d)"
-          !non_blocking_queues );
-      ( "--maybe_blocking_queues",
-        Arg.Int (fun i -> maybe_blocking_queues := i),
-        Printf.sprintf "Number of maybe-blocking queues. (default: %d)"
-          !maybe_blocking_queues );
+      ( "--queues",
+        Arg.Int (fun i -> queues := Some i),
+        Printf.sprintf
+          "Number of non-blocking queues. (default: number of CPU cores)" );
       ( "--port",
         Arg.Int (fun i -> port := i),
         Printf.sprintf "Port used to bind the server. (default: %d)" !port );
@@ -35,9 +30,16 @@ let () =
     exit 1)
   else ()
 
-type priority = Maybe_blocking | Non_blocking
+type priority = Non_blocking
 
 let scheduler = Duppy.create ()
+
+let new_pool ?size ~priority ~name () =
+  let priorities p = p = priority in
+  Duppy.pool scheduler ~priorities ?size name
+
+let () =
+  new_pool ?size:!queues ~priority:Non_blocking ~name:"Non blocking queue" ()
 
 type http_method = Post | Get
 type http_protocol = Http_11 | Http_10
@@ -277,7 +279,9 @@ let cgi_handler process path h request =
           (Filename.quote tr_suffix) (Filename.quote suffix)
       in
       let sanitize s =
-        Pcre.substitute ~rex:(Pcre.regexp "-") ~subst:(fun _ -> "_") (String.uppercase_ascii s)
+        Pcre.substitute ~rex:(Pcre.regexp "-")
+          ~subst:(fun _ -> "_")
+          (String.uppercase_ascii s)
       in
       let headers =
         List.map (fun (x, y) -> (sanitize x, y)) request.request_headers
@@ -343,7 +347,9 @@ let cgi_handler process path h request =
                       in
                       ignore (Unix.close_process (in_c, out_c));
                       let __pa_duppy_0 =
-                        let headers = Pcre.split ~rex:(Pcre.regexp "\r\n") headers in
+                        let headers =
+                          Pcre.split ~rex:(Pcre.regexp "\r\n") headers
+                        in
                         parse_headers headers
                       in
                       Duppy.Monad.bind __pa_duppy_0 (fun headers ->
@@ -500,11 +506,6 @@ let handle_client socket =
   let finish _ = try Unix.close socket with _ -> () in
   Duppy.Monad.run ~return:finish ~raise:finish (exec ())
 
-let new_queue ~priority ~name () =
-  let priorities p = p = priority in
-  let queue () = Duppy.queue scheduler ~log:(fun _ -> ()) ~priorities name in
-  Thread.create queue ()
-
 let bind_addr_inet = Unix.inet_addr_of_string "0.0.0.0"
 let bind_addr = Unix.ADDR_INET (bind_addr_inet, !port)
 let max_conn = 100
@@ -517,6 +518,11 @@ let () =
   Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
   ignore (Unix.sigprocmask Unix.SIG_BLOCK [Sys.sigpipe]);
   Unix.setsockopt sock Unix.SO_REUSEADDR true;
+  Sys.set_signal Sys.sigint
+    (Sys.Signal_handle
+       (fun _ ->
+         Duppy.stop scheduler;
+         exit 0));
   let rec incoming _ =
     (try
        let s, _ = Unix.accept sock in
@@ -541,16 +547,4 @@ let () =
       events = [`Read sock];
       handler = incoming;
     };
-  for i = 1 to !non_blocking_queues do
-    ignore
-      (new_queue ~priority:Non_blocking
-         ~name:(Printf.sprintf "Non blocking queue #%d" i)
-         ())
-  done;
-  for i = 1 to !maybe_blocking_queues do
-    ignore
-      (new_queue ~priority:Maybe_blocking
-         ~name:(Printf.sprintf "Maybe blocking queue #%d" i)
-         ())
-  done;
-  Duppy.queue scheduler ~log:(fun _ -> ()) "root"
+  Duppy.wait scheduler

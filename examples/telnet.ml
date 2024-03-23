@@ -1,24 +1,19 @@
 type priority = Non_blocking | Maybe_blocking
 
 let io_priority = Non_blocking
+let ( let* ) = Duppy.Monad.bind
+let log = Printf.printf "telnet: %s\n%!"
 
 (* Create scheduler *)
-let scheduler = Duppy.create ()
+let scheduler = Duppy.create ~log ()
 
-(* Create two queues,
- * one for non blocking events
- * and another for blocking 
- * events *)
-let new_queue ~priority ~name () =
-  let log = Printf.printf "%s: %s\n%!" name in
+let new_pool ?size ~priority ~name () =
   let priorities p = p = priority in
-  let queue () = Duppy.queue scheduler ~log ~priorities name in
-  Thread.create queue ()
+  Duppy.pool scheduler ~priorities ?size name
 
-let th =
-  ignore (new_queue ~priority:Non_blocking ~name:"Non blocking queue" ());
-  ignore (new_queue ~priority:Maybe_blocking ~name:"Maybe blocking queue #1" ());
-  new_queue ~priority:Maybe_blocking ~name:"Maybe blocking queue #2" ()
+let () =
+  new_pool ~priority:Non_blocking ~name:"Non blocking queue" ();
+  new_pool ~priority:Maybe_blocking ~name:"Maybe blocking queue" ()
 
 let exec_command s () =
   let chan = Unix.open_process_in s in
@@ -56,43 +51,41 @@ let () =
 let handle_client socket =
   let on_error e =
     match e with
-      | Duppy.Io.Io_error -> Printf.printf "Client disconnected"
+      | Duppy.Io.Io_error -> log "Client disconnected"
       | Duppy.Io.Unix (c, p, m) ->
-          Printf.printf "%s" (Printexc.to_string (Unix.Unix_error (c, p, m)))
-      | Duppy.Io.Unknown e -> Printf.printf "%s" (Printexc.to_string e)
-      | Duppy.Io.Timeout -> Printf.printf "Timeout"
+          log (Printexc.to_string (Unix.Unix_error (c, p, m)))
+      | Duppy.Io.Unknown e -> log (Printexc.to_string e)
+      | Duppy.Io.Timeout -> log "Timeout"
   in
   let h = { Duppy.Monad.Io.scheduler; socket; data = ""; on_error } in
   (* Read and process lines *)
   let rec exec () =
-    let __pa_duppy_0 =
+    let* req =
       Duppy.Monad.Io.read ?timeout:None ~priority:io_priority
         ~marker:(Duppy.Io.Split "[\r\n]+") h
     in
-    Duppy.Monad.bind __pa_duppy_0 (fun req ->
-        let __pa_duppy_0 =
-          try
-            let blocking, command = Hashtbl.find commands req in
-            if not blocking then command ()
-            else Duppy.Monad.Io.exec ~priority:Maybe_blocking h (command ())
-          with Not_found ->
-            Duppy.Monad.return
-              "ERROR: unknown command, type \"help\" to get a list of commands."
-        in
-        Duppy.Monad.bind __pa_duppy_0 (fun ans ->
-            Duppy.Monad.bind
-              (Duppy.Monad.bind
-                 (Duppy.Monad.Io.write ?timeout:None ~priority:io_priority h
-                    (Bytes.unsafe_of_string "BEGIN\r\n"))
-                 (fun () ->
-                   Duppy.Monad.bind
-                     (Duppy.Monad.Io.write ?timeout:None ~priority:io_priority h
-                        (Bytes.unsafe_of_string ans))
-                     (fun () ->
-                       Duppy.Monad.Io.write ?timeout:None ~priority:io_priority
-                         h
-                         (Bytes.unsafe_of_string "\r\nEND\r\n"))))
-              (fun () -> exec ())))
+    let* ans =
+      try
+        let blocking, command = Hashtbl.find commands req in
+        if not blocking then command ()
+        else Duppy.Monad.Io.exec ~priority:Maybe_blocking h (command ())
+      with Not_found ->
+        Duppy.Monad.return
+          "ERROR: unknown command, type \"help\" to get a list of commands."
+    in
+    let* () =
+      Duppy.Monad.Io.write ?timeout:None ~priority:io_priority h
+        (Bytes.unsafe_of_string "BEGIN\r\n")
+    in
+    let* () =
+      Duppy.Monad.Io.write ?timeout:None ~priority:io_priority h
+        (Bytes.unsafe_of_string ans)
+    in
+    let* () =
+      Duppy.Monad.Io.write ?timeout:None ~priority:io_priority h
+        (Bytes.unsafe_of_string "\r\nEND\r\n")
+    in
+    exec ()
   in
   let close () = try Unix.close socket with _ -> () in
   let return () =
@@ -125,10 +118,12 @@ let () =
          in
          try (gethostbyaddr a).h_name with Not_found -> string_of_inet_addr a
        in
-       Printf.printf "New client: %s\n" ip;
+       log (Printf.sprintf "New client: %s" ip);
        handle_client s
      with e ->
-       Printf.printf "Failed to accept new client: %S\n" (Printexc.to_string e));
+       log
+         (Printf.sprintf "Failed to accept new client: %S"
+            (Printexc.to_string e)));
     [
       {
         Duppy.Task.priority = io_priority;
@@ -147,4 +142,9 @@ let () =
       Duppy.Task.events = [`Read sock];
       Duppy.Task.handler = incoming;
     };
-  Thread.join th
+  Sys.set_signal Sys.sigint
+    (Sys.Signal_handle
+       (fun _ ->
+         Duppy.stop scheduler;
+         exit 0));
+  Duppy.wait scheduler
