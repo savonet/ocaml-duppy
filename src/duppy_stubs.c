@@ -28,6 +28,7 @@
 #include <caml/threads.h>
 
 #include <errno.h>
+#include <math.h>
 
 /* On native Windows platforms, many macros are not defined.  */ 
 # if (defined _WIN32 || defined __WIN32__) && ! defined __CYGWIN__ 
@@ -65,7 +66,7 @@ CAMLprim value caml_poll(value _read, value _write, value _err, value _timeout) 
   if (Double_val(_timeout) == -1)
     timeout = -1;
   else
-    timeout = Double_val(_timeout) * 1000;
+    timeout = ceil(Double_val(_timeout) * 1000);
 
   nfds += Wosize_val(_read);
   nfds += Wosize_val(_write);
@@ -97,7 +98,7 @@ CAMLprim value caml_poll(value _read, value _write, value _err, value _timeout) 
 
   if (ret == -1) {
     free(fds);
-    uerror("poll",Nothing);
+    uerror("poll", Nothing);
   }
 
   for (n = 0; n < nfds; n++) {
