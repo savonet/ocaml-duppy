@@ -14,5 +14,5 @@
  (depends
   (ocaml (>= 4.07.0))
   dune
-  re)
+  (re (>= 1.7.2)))
 )
