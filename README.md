@@ -1,3 +1,5 @@
+### ⚠️ The development on this module has stopped! Its features have bee added to liquidsoap internally. Feel free to contact us if you are interested in a stand-alone module ⚠️
+
 # ocaml-duppy
 
 ocaml-duppy is an advanced scheduler for Ocaml programmers.
