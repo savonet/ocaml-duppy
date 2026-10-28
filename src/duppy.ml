@@ -23,103 +23,338 @@
 module Pcre = Re.Pcre
 
 type fd = Unix.file_descr
+type event = [ `Delay of float | `Write of fd | `Read of fd ]
 
-external poll :
-  Unix.file_descr array ->
-  Unix.file_descr array ->
-  Unix.file_descr array ->
-  float ->
-  Unix.file_descr array * Unix.file_descr array * Unix.file_descr array
-  = "caml_poll"
-
-let poll r w e timeout =
-  let r = Array.of_list r in
-  let w = Array.of_list w in
-  let e = Array.of_list e in
-  let r, w, e = poll r w e timeout in
-  (Array.to_list r, Array.to_list w, Array.to_list e)
-
-let select, select_fname =
-  match Sys.os_type with
-    | "Unix" -> (poll, "poll")
-    | _ -> (Unix.select, "select")
-
-(** [remove f l] is like [List.find f l] but also returns the result of removing
-  * the found element from the original list. *)
-let remove f l =
-  let rec aux acc = function
-    | [] -> raise Not_found
-    | x :: l -> if f x then (x, List.rev_append acc l) else aux (x :: acc) l
-  in
-  aux [] l
-
-(** Events and tasks from the implementation point-of-view:
-  * we have to hide the 'a parameter. *)
-
-type e = { r : fd list; w : fd list; x : fd list; t : float }
-
+(** A submitted task: what it waits on and what to run with whichever of its
+    events occurred. [fds] are the distinct descriptors of [events], in the
+    order the core reports on them. *)
 type 'a t = {
-  timestamp : float;
   prio : 'a;
-  enrich : e -> e;
-  is_ready : e -> (unit -> 'a t list) option;
+  t0 : float;
+  events : event list;
+  fds : fd array;
+  fire : event list -> 'a t list;
+  (* The one worker allowed to run it, by domain. *)
+  pinned : int option;
 }
+
+external time : unit -> float = "duppy_stub_now"
+
+(** The scheduler's core, specified in SPEC.md. Tasks are known to it by a
+    handle and plain data: no OCaml value crosses this interface. *)
+module Core = struct
+  type t
+
+  external create : fd -> fd -> bool -> t = "duppy_stub_create"
+  external backend : t -> string = "duppy_stub_backend"
+  external start : t -> int -> int -> unit = "duppy_stub_start"
+
+  external start_growing : t -> int -> int -> int -> unit
+    = "duppy_stub_start_growing"
+
+  external await_growth : t -> float -> int = "duppy_stub_await_growth"
+  external stop : t -> unit = "duppy_stub_stop"
+  external reserve : t -> int -> int = "duppy_stub_reserve" [@@noalloc]
+  external slots : t -> int = "duppy_stub_slots" [@@noalloc]
+  external error : t -> string = "duppy_stub_error"
+
+  external submit :
+    t ->
+    int ->
+    int ->
+    int ->
+    int ->
+    int ->
+    float ->
+    fd array ->
+    int array ->
+    unit = "duppy_stub_submit_bytecode" "duppy_stub_submit"
+
+  external take : t -> int -> int array -> int = "duppy_stub_take" [@@noalloc]
+  external wait : t -> int -> unit = "duppy_stub_wait"
+
+  external blocking_done : t -> int -> unit = "duppy_stub_blocking_done"
+  [@@noalloc]
+
+  (** What [take] hands over, in the order of [duppy_work]. *)
+  let work = function
+    | 0 -> `None
+    | 1 -> `Batch
+    | 2 -> `One_direct
+    | 3 -> `One_threaded
+    | 4 -> `Stopped
+    | 5 -> `Failed
+    | _ -> assert false
+
+  let ranks = 64
+  let read = 1
+  let write = 2
+  let any_worker = -1
+  let every_worker = -1
+end
+
+(** Handles to values, issued and resolved without a lock. A handle is passed
+    from the domain that adds a value to the one that takes it through the core,
+    whose own lock orders the two accesses. *)
+module Slab = struct
+  let chunk_bits = 12
+  let chunk_size = 1 lsl chunk_bits
+  let chunk_count = 1 lsl 12
+
+  type 'a t = {
+    chunks : 'a option array Atomic.t array;
+    next : int Atomic.t;
+    free : int list Atomic.t;
+  }
+
+  let create () =
+    {
+      chunks = Array.init chunk_count (fun _ -> Atomic.make [||]);
+      next = Atomic.make 0;
+      free = Atomic.make [];
+    }
+
+  let rec reuse t =
+    match Atomic.get t.free with
+      | [] -> Atomic.fetch_and_add t.next 1
+      | handle :: rest as free ->
+          if Atomic.compare_and_set t.free free rest then handle else reuse t
+
+  let rec release t handle =
+    let free = Atomic.get t.free in
+    if not (Atomic.compare_and_set t.free free (handle :: free)) then
+      release t handle
+
+  let chunk t handle =
+    if handle lsr chunk_bits >= chunk_count then
+      failwith "Duppy: too many tasks";
+    let cell = t.chunks.(handle lsr chunk_bits) in
+    match Atomic.get cell with
+      | [||] as empty ->
+          let fresh = Array.make chunk_size None in
+          if Atomic.compare_and_set cell empty fresh then fresh
+          else Atomic.get cell
+      | chunk -> chunk
+
+  let add t v =
+    let handle = reuse t in
+    (chunk t handle).(handle land (chunk_size - 1)) <- Some v;
+    handle
+
+  let take t handle =
+    let chunk = chunk t handle in
+    let slot = handle land (chunk_size - 1) in
+    let v = chunk.(slot) in
+    chunk.(slot) <- None;
+    release t handle;
+    v
+
+  let clear t = Array.iter (fun cell -> Atomic.set cell [||]) t.chunks
+end
+
+let fds_of_events events =
+  List.sort_uniq compare
+    (List.filter_map
+       (function `Read fd | `Write fd -> Some fd | `Delay _ -> None)
+       events)
+
+let interest_for fd events =
+  List.fold_left
+    (fun acc ev ->
+      match ev with
+        | `Read f when f = fd -> acc lor Core.read
+        | `Write f when f = fd -> acc lor Core.write
+        | _ -> acc)
+    0 events
+
+let earliest_delay events =
+  List.fold_left
+    (fun earliest -> function
+      | `Delay d -> Float.min earliest d | _ -> earliest)
+    infinity events
+
+(** Which of [t]'s events occurred, from what the core wrote at [position]: its
+    handle, whether its delay elapsed, then a mask for each of [t.fds]. *)
+let fired_events t taken position =
+  let now = time () in
+  let expired = taken.(position + 1) = 1 in
+  let earliest = earliest_delay t.events in
+  let occurred fd flag =
+    let rec find i =
+      i < Array.length t.fds
+      &&
+      if t.fds.(i) = fd then taken.(position + 2 + i) land flag <> 0
+      else find (i + 1)
+    in
+    find 0
+  in
+  List.filter
+    (function
+      | `Delay d -> expired && (d <= earliest || now >= t.t0 +. d)
+      | `Read fd -> occurred fd Core.read
+      | `Write fd -> occurred fd Core.write)
+    t.events
+
+type execution_class = [ `Immediate | `Direct | `Threaded ]
+
+(** Wraps every task body. Effect handlers do not cross the thread a task is
+    dispatched to, so a caller whose tasks need one installs it here. *)
+type wrapper = { wrap : 'a. (unit -> 'a) -> 'a }
+
+(** One domain or thread of the pool. [taken] receives what the core hands this
+    worker. [blocking] counts the tasks parked on its auxiliary threads, which
+    live in [aux_pending] and the fields around it. *)
+type 'a worker = {
+  index : int;
+  accepts : 'a -> bool;
+  (* Set by [start] from the spawned domain; stays [-1] on a thread pool. *)
+  mutable domain : int;
+  taken : int array;
+  blocking : int Atomic.t;
+  (* Threads started by [thread] that live on this worker's domain. *)
+  threads : int Atomic.t;
+  aux_m : Mutex.t;
+  aux_c : Condition.t;
+  mutable aux_pending : (unit -> unit) list;
+  mutable aux_busy : int;
+  mutable aux_total : int;
+}
+
+type member = [ `Domain of unit Domain.t | `Thread of Thread.t ]
 
 type 'a scheduler = {
   on_error : exn -> Printexc.raw_backtrace -> unit;
-  out_pipe : Unix.file_descr;
-  in_pipe : Unix.file_descr;
-  compare : 'a -> 'a -> int;
-  select_m : Mutex.t;
-  mutable tasks : 'a t list;
-  tasks_m : Mutex.t;
-  mutable ready : ('a * (unit -> 'a t list)) list;
-  ready_m : Mutex.t;
-  mutable queues : Condition.t list;
-  queues_m : Mutex.t;
-  mutable stop : bool;
-  stop_m : Mutex.t;
-  queue_stopped_c : Condition.t;
+  on_fatal : exn -> Printexc.raw_backtrace -> unit;
+  mutable log : (string -> unit) option;
+  rank : 'a -> int;
+  classify : 'a -> execution_class;
+  wrapper : wrapper;
+  core : Core.t;
+  wake_read : fd;
+  wake_write : fd;
+  tasks : 'a t Slab.t;
+  (* Submitted before the pool exists, which is what decides who may take
+     them. *)
+  pending : 'a t list Atomic.t;
+  started : bool Atomic.t;
+  running : bool Atomic.t;
+  stopped : bool Atomic.t;
+  mutable threaded : bool;
+  mutable selective : bool;
+  (* The running workers: a growing pool appends to it. *)
+  mutable workers : 'a worker list;
+  mutable members : member list;
+  (* Held while the pool grows, so that [stop] joins every member. *)
+  grow_m : Mutex.t;
 }
 
-let clear_tasks s =
-  Mutex.lock s.tasks_m;
-  s.tasks <- [];
-  Mutex.unlock s.tasks_m
+let default_on_fatal exn bt =
+  Printf.eprintf "Duppy: event loop crashed with %s\n%s\n%!"
+    (Printexc.to_string exn)
+    (Printexc.raw_backtrace_to_string bt);
+  exit 1
 
-let create ?(on_error = Printexc.raise_with_backtrace) ?(compare = compare) () =
-  let out_pipe, in_pipe = Unix.pipe () in
-  Unix.set_nonblock in_pipe;
+(* Forces the portable backend, so that it runs where a native one exists. *)
+let forced_fallback () = Sys.getenv_opt "DUPPY_BACKEND" = Some "poll"
+
+let create ?(on_error = Printexc.raise_with_backtrace)
+    ?(on_fatal = default_on_fatal) ?(rank = fun _ -> 0)
+    ?(classify : 'a -> execution_class = fun _ -> `Threaded)
+    ?(wrapper = { wrap = (fun fn -> fn ()) }) () =
+  (* A socket pair rather than a pipe: on Windows only sockets can be made
+     non-blocking, and a blocking wake-up write could hang its caller. *)
+  let wake_read, wake_write = Unix_utils.socketpair () in
+  Unix.set_nonblock wake_write;
   {
     on_error;
-    out_pipe;
-    in_pipe;
-    compare;
-    select_m = Mutex.create ();
-    tasks = [];
-    tasks_m = Mutex.create ();
-    ready = [];
-    ready_m = Mutex.create ();
-    queues = [];
-    queues_m = Mutex.create ();
-    stop = false;
-    stop_m = Mutex.create ();
-    queue_stopped_c = Condition.create ();
+    on_fatal;
+    log = None;
+    rank;
+    classify;
+    wrapper;
+    core = Core.create wake_read wake_write (forced_fallback ());
+    wake_read;
+    wake_write;
+    tasks = Slab.create ();
+    pending = Atomic.make [];
+    started = Atomic.make false;
+    running = Atomic.make false;
+    stopped = Atomic.make false;
+    threaded = false;
+    selective = false;
+    workers = [];
+    members = [];
+    grow_m = Mutex.create ();
   }
 
-let wake_up s =
-  try ignore (Unix.write s.in_pipe (Bytes.of_string "x") 0 1)
-  with
-  | Unix.Unix_error (Unix.EAGAIN, _, _)
-  | Unix.Unix_error (Unix.EWOULDBLOCK, _, _)
-  ->
-    ()
+let started s = Atomic.get s.started
+let log s fn = match s.log with None -> () | Some log -> log (fn ())
+let worker_for s domain = List.find_opt (fun w -> w.domain = domain) s.workers
+
+exception Unknown_domain of int
+
+let class_code = function `Immediate -> 0 | `Direct -> 1 | `Threaded -> 2
+
+(** Workers that declare what they accept are told to the core as one bit each.
+*)
+let accepted_by s prio =
+  if not s.selective then Core.every_worker
+  else
+    List.fold_left
+      (fun mask w -> if w.accepts prio then mask lor (1 lsl w.index) else mask)
+      0 s.workers
+
+let submit s t =
+  if not (Atomic.get s.stopped) then begin
+    let rank = s.rank t.prio in
+    if rank < 0 || rank >= Core.ranks then
+      invalid_arg "Duppy: rank out of range";
+    let pin =
+      match t.pinned with
+        | None -> Core.any_worker
+        | Some domain -> (
+            match worker_for s domain with
+              | Some w -> w.index
+              | None -> raise (Unknown_domain domain))
+    in
+    let delay =
+      match earliest_delay t.events with
+        | d when d = infinity -> -1.
+        | d -> Float.max 0. (t.t0 +. d -. time ())
+    in
+    let handle = Slab.add s.tasks t in
+    try
+      Core.submit s.core handle rank
+        (class_code (s.classify t.prio))
+        pin (accepted_by s t.prio) delay t.fds
+        (Array.map (fun fd -> interest_for fd t.events) t.fds)
+    with exn ->
+      ignore (Slab.take s.tasks handle);
+      raise exn
+  end
+
+let flush_pending s =
+  List.iter (submit s) (List.rev (Atomic.exchange s.pending []))
+
+let rec hold s t =
+  let pending = Atomic.get s.pending in
+  if not (Atomic.compare_and_set s.pending pending (t :: pending)) then hold s t
+
+(* A task held just as the pool starts is flushed by whoever looks last. *)
+let add_t s tasks =
+  List.iter
+    (fun t ->
+      if Atomic.get s.running then submit s t
+      else begin
+        hold s t;
+        if Atomic.get s.running then flush_pending s
+      end)
+    tasks
 
 module Task = struct
   (** Events and tasks from the user's point-of-view. *)
 
-  type event =
-    [ `Delay of float | `Write of fd | `Read of fd | `Exception of fd ]
+  type nonrec event = event
 
   type ('a, 'b) task = {
     priority : 'a;
@@ -127,287 +362,472 @@ module Task = struct
     handler : 'b list -> ('a, 'b) task list;
   }
 
-  let time () = Unix.gettimeofday ()
-
-  let rec t_of_task (task : ('a, [< event ]) task) =
-    let t0 = time () in
+  let rec t_of_task ?domain (task : ('a, [< event ]) task) =
+    let events = (task.events :> event list) in
     {
-      timestamp = t0;
       prio = task.priority;
-      enrich =
-        (fun e ->
-          List.fold_left
-            (fun e -> function
-              | `Delay s -> { e with t = min e.t (t0 +. s) }
-              | `Read s -> { e with r = s :: e.r }
-              | `Write s -> { e with w = s :: e.w }
-              | `Exception s -> { e with x = s :: e.x })
-            e task.events);
-      is_ready =
-        (fun e ->
+      t0 = time ();
+      events;
+      fds = Array.of_list (fds_of_events events);
+      fire =
+        (fun fired ->
           let l =
-            List.filter
-              (fun evt ->
-                match (evt :> event) with
-                  | `Delay s when time () > t0 +. s -> true
-                  | `Read s when List.mem s e.r -> true
-                  | `Write s when List.mem s e.w -> true
-                  | `Exception s when List.mem s e.x -> true
-                  | _ -> false)
-              task.events
+            List.filter (fun ev -> List.mem (ev :> event) fired) task.events
           in
-          if l = [] then None
-          else Some (fun () -> List.map t_of_task (task.handler l)));
+          List.map (t_of_task ?domain) (task.handler l));
+      pinned = domain;
     }
 
-  let add_t s items =
-    let f item =
-      match item.is_ready { r = []; w = []; x = []; t = 0. } with
-        | Some f ->
-            Mutex.lock s.ready_m;
-            s.ready <- (item.prio, f) :: s.ready;
-            Mutex.unlock s.ready_m
-        | None ->
-            Mutex.lock s.tasks_m;
-            s.tasks <- item :: s.tasks;
-            Mutex.unlock s.tasks_m
-    in
-    List.iter f items;
-    wake_up s
-
-  let add s t = add_t s [t_of_task t]
+  (* A pin names a worker that has to exist and accept the task, so a wrong one
+     fails here rather than leaving a task nobody will ever take. *)
+  let add ?domain s t =
+    (match domain with
+      | None -> ()
+      | Some d -> (
+          if (not (Atomic.get s.running)) || s.threaded then
+            raise (Unknown_domain d);
+          match worker_for s d with
+            | Some w when w.accepts t.priority -> ()
+            | _ -> raise (Unknown_domain d)));
+    add_t s [t_of_task ?domain t]
 end
 
 open Task
 
-let stop s =
-  clear_tasks s;
-  Mutex.lock s.stop_m;
-  s.stop <- true;
-  Mutex.unlock s.stop_m;
-  Mutex.lock s.queues_m;
-  while List.length s.queues > 0 do
-    wake_up s;
-    Mutex.lock s.ready_m;
-    List.iter Condition.signal s.queues;
-    Mutex.unlock s.ready_m;
-    Condition.wait s.queue_stopped_c s.queues_m
-  done;
-  Mutex.unlock s.queues_m
+(** A parked computation and the means to wake it. *)
+type suspension = { park : (event list -> unit) -> unit }
 
-let tmp = Bytes.create 1024
+type _ Effect.t += Await : suspension -> event list Effect.t
 
-(** There should be only one call of #process at a time.
-  * Process waits for tasks to become ready, and moves ready tasks
-  * to the ready queue. *)
-let process s log =
-  (* Compute the union of all events. *)
-  let e =
-    List.fold_left
-      (fun e t -> t.enrich e)
-      { r = [s.out_pipe]; w = []; x = []; t = infinity }
-      s.tasks
-  in
-  (* Poll for an event. *)
-  let r, w, x =
-    let rec f () =
-      try
-        let timeout = if e.t = infinity then -1. else max 0. (e.t -. time ()) in
-        log
-          (Printf.sprintf "Enter %s at %f, timeout %f (%d/%d/%d)." select_fname
-             (time ()) timeout (List.length e.r) (List.length e.w)
-             (List.length e.x));
-        let r, w, x = select e.r e.w e.x timeout in
-        log
-          (Printf.sprintf "Left %s at %f (%d/%d/%d)." select_fname (time ())
-             (List.length r) (List.length w) (List.length x));
-        (r, w, x)
-      with
-        | Unix.Unix_error (Unix.EINTR, _, _) ->
-            (* [EINTR] means that select was interrupted by
-             * a signal before any of the selected events
-             * occurred and before the timeout interval expired.
-             * We catch it and restart.. *)
-            log (Printf.sprintf "Select interrupted at %f." (time ()));
-            f ()
-        | e ->
-            (* Uncaught exception:
-             * 1) Discards all tasks currently in the loop (we do not know which
-             *    socket caused an error).
-             * 2) Re-Raise e *)
-            clear_tasks s;
-            raise e
-    in
-    f ()
-  in
-  (* Empty the wake_up pipe if needed. *)
-  let () =
-    if List.mem s.out_pipe r then
-      (* For safety, we may absorb more than
-       * one write. This avoids bad situation
-       * when exceesive wake_up may fill up the
-       * pipe's write buffer, causing a wake_up
-       * to become blocking.. *)
-      ignore (Unix.read s.out_pipe tmp 0 1024)
-  in
-  (* Move ready tasks to the ready list. *)
-  let e = { r; w; x; t = 0. } in
-  Mutex.lock s.tasks_m;
-  (* Split [tasks] into [r]eady and still [w]aiting. *)
-  let r, w =
-    List.fold_left
-      (fun (r, w) t ->
-        match t.is_ready e with
-          | Some f -> ((t.prio, f) :: r, w)
-          | None -> (r, t :: w))
-      ([], []) s.tasks
-  in
-  s.tasks <- w;
-  Mutex.unlock s.tasks_m;
-  Mutex.lock s.ready_m;
-  s.ready <-
-    List.stable_sort (fun (p, _) (p', _) -> s.compare p p') (s.ready @ r);
-  Mutex.unlock s.ready_m
+let await ~priority s events =
+  let events = (events :> event list) in
+  Effect.perform
+    (Await
+       {
+         park =
+           (fun resume ->
+             Task.add s
+               {
+                 priority;
+                 events;
+                 handler =
+                   (fun e ->
+                     resume e;
+                     []);
+               });
+       })
 
-(** Code for a queue to process ready tasks.
-  * Returns true a task was found (and hence processed).
-  *
-  * s.ready_m *must* be locked before calling
-  * this function, and is freed *only*
-  * if some task was processed. *)
-let exec s (priorities : 'a -> bool) =
-  (* This assertion does not work on
-   * win32 because a thread can double-lock
-   * the same mutex.. *)
-  if Sys.os_type <> "Win32" then assert (not (Mutex.try_lock s.ready_m));
-  match remove (fun (p, _) -> priorities p) s.ready with
-    | (_, task), remaining ->
-        s.ready <- remaining;
-        Mutex.unlock s.ready_m;
-        let tasks =
-          match task () with
-            | exception exn ->
-                let bt = Printexc.get_raw_backtrace () in
-                s.on_error exn bt;
-                []
-            | v -> v
-        in
-        add_t s tasks;
-        true
-    | exception Not_found -> false
+(* The delay and the resumer race on [resumed]. The loser stays a task that
+   does nothing: cancelling it would need a wake by handle in the core. *)
+let suspend ?delay ~priority s register =
+  ignore
+    (Effect.perform
+       (Await
+          {
+            park =
+              (fun resume ->
+                let resumed = Atomic.make false in
+                let resume_after delay =
+                  Task.add s
+                    {
+                      priority;
+                      events = [`Delay delay];
+                      handler =
+                        (fun _ ->
+                          if Atomic.compare_and_set resumed false true then
+                            resume [];
+                          []);
+                    }
+                in
+                Option.iter resume_after delay;
+                register (fun () -> resume_after 0.));
+          }))
 
-exception Queue_stopped
-exception Queue_processed
+let reschedule ?(delay = 0.) ~priority s =
+  ignore (await ~priority s [`Delay delay])
 
-(** Main loop for queues. *)
-let queue ?log ?(priorities = fun _ -> true) s name =
-  let log =
-    match log with Some e -> e | None -> Printf.printf "queue %s: %s\n" name
-  in
-  let c =
-    let c = Condition.create () in
-    Mutex.lock s.queues_m;
-    s.queues <- c :: s.queues;
-    Mutex.unlock s.queues_m;
-    log (Printf.sprintf "Queue #%d starting..." (List.length s.queues));
-    c
-  in
-  (* Try to process ready tasks, otherwise try to become the master,
-   * or be a slave and wait for the master to get some more ready tasks. *)
-  let run () =
-    Mutex.lock s.stop_m;
-    let stop = s.stop in
-    Mutex.unlock s.stop_m;
-    if stop then raise Queue_stopped;
-    (* Lock the ready tasks until the queue has a task to proceed,
-     * *or* is really ready to restart on its condition, see the
-     * Condition.wait call below for the atomic unlock and wait. *)
-    Mutex.lock s.ready_m;
-    log (Printf.sprintf "There are %d ready tasks." (List.length s.ready));
-    if exec s priorities then raise Queue_processed;
-    let wake () =
-      let is_ready =
-        Mutex.lock s.ready_m;
-        let is_ready = s.ready <> [] in
-        Mutex.unlock s.ready_m;
-        is_ready
-      in
-      (* Wake up other queues if there are remaining tasks *)
-      if is_ready then begin
-        Mutex.lock s.queues_m;
-        List.iter (fun x -> if x <> c then Condition.signal x) s.queues;
-        Mutex.unlock s.queues_m
-      end
-    in
-    if Mutex.try_lock s.select_m then begin
-      (* Processing finished for me
-       * I can unlock ready_m now.. *)
-      Mutex.unlock s.ready_m;
-      process s log;
-      Mutex.unlock s.select_m;
-      wake ()
-    end
-    else begin
-      (* We use s.ready_m mutex here.
-       * Hence, we avoid race conditions
-       * with any other queue being processing
-       * a task that would create a new task:
-       * without this mutex, the new task may not be
-       * notified to this queue if it is going to sleep
-       * in concurrency..
-       * It also avoid race conditions when restarting
-       * queues since s.ready_m is locked until all
-       * queues have been signaled. *)
-      Condition.wait c s.ready_m;
-      Mutex.unlock s.ready_m
-    end
-  in
-  let rec f () =
-    begin
-      try run () with Queue_processed -> ()
-    end;
-    (f [@tailcall]) ()
-  in
-  let on_done () =
-    Mutex.lock s.queues_m;
-    s.queues <- List.filter (fun q -> q <> c) s.queues;
-    Condition.signal s.queue_stopped_c;
-    Mutex.unlock s.queues_m
-  in
-  (try f () with
-    | Queue_stopped -> ()
-    | exn ->
+(* A deep handler is part of the continuation it captures, so resuming
+   reinstates it and the computation can park again. Parking registers an
+   ordinary task whose handler resumes, which is why the task returns no new
+   work of its own. *)
+let run fn =
+  let open Effect.Deep in
+  Effect_utils.try_with fn ()
+    {
+      effc =
+        (fun (type a) (e : a Effect.t) ->
+          match e with
+            | Await { park } ->
+                Some
+                  (fun (k : (a, unit) continuation) ->
+                    park (fun events -> continue k events))
+            | _ -> None);
+    }
+
+(* A park is handled by blocking: the calling thread waits here for what the
+   computation parked on, then continues the computation itself. *)
+let blocking fn =
+  let open Effect.Deep in
+  Effect_utils.try_with fn ()
+    {
+      effc =
+        (fun (type a) (e : a Effect.t) ->
+          match e with
+            | Await { park } ->
+                Some
+                  (fun (k : (a, _) continuation) ->
+                    let m = Mutex.create () in
+                    let woken = Stdlib.Condition.create () in
+                    let occurred = ref None in
+                    park (fun events ->
+                        Mutex.protect m (fun () ->
+                            occurred := Some events;
+                            Stdlib.Condition.signal woken));
+                    let events =
+                      Mutex.protect m (fun () ->
+                          while !occurred = None do
+                            Stdlib.Condition.wait woken m
+                          done;
+                          Option.get !occurred)
+                    in
+                    continue k events)
+            | _ -> None);
+    }
+
+let run_task s fn =
+  match s.wrapper.wrap fn with
+    | exception exn ->
         let bt = Printexc.get_raw_backtrace () in
-        (try on_done () with _ -> ());
-        Printexc.raise_with_backtrace exn bt);
-  on_done ()
+        s.on_error exn bt;
+        []
+    | v -> v
+
+(** Auxiliary threads are kept parked between tasks, since a task in this class
+    can be shorter than the spawn it would otherwise pay for. A worker keeps an
+    even share of the budget parked: the threads a burst added beyond it exit
+    once idle.
+
+    Finishing a job leads back into the queue check under the same lock, so a
+    thread with work waiting never parks and is never counted idle in the window
+    where a submission would pick it. *)
+let aux_loop s w =
+  let kept () =
+    let workers = List.length s.workers in
+    (Core.slots s.core + workers - 1) / workers
+  in
+  let rec loop () =
+    while
+      w.aux_pending = []
+      && (not (Atomic.get s.stopped))
+      && w.aux_total <= kept ()
+    do
+      Condition.wait w.aux_c w.aux_m
+    done;
+    match w.aux_pending with
+      | [] ->
+          w.aux_total <- w.aux_total - 1;
+          Mutex.unlock w.aux_m
+      | job :: rest ->
+          w.aux_pending <- rest;
+          w.aux_busy <- w.aux_busy + 1;
+          Mutex.unlock w.aux_m;
+          (* [on_error] has already seen what escapes a job: like on a domain,
+             it is fatal rather than left to kill this thread. *)
+          (try job ()
+           with exn ->
+             let bt = Printexc.get_raw_backtrace () in
+             s.on_fatal exn bt);
+          Mutex.lock w.aux_m;
+          w.aux_busy <- w.aux_busy - 1;
+          loop ()
+  in
+  Mutex.lock w.aux_m;
+  loop ()
+
+(** Blocking tasks run on an auxiliary systhread inside the worker's domain:
+    once the task parks in a syscall it releases the runtime lock and the domain
+    goes back to dispatching.
+
+    A worker that is itself a thread already releases the lock when it parks, so
+    it runs the task in place. *)
+let run_blocking s w fn =
+  Atomic.incr w.blocking;
+  let run () =
+    Fun.protect
+      ~finally:(fun () ->
+        Atomic.decr w.blocking;
+        Core.blocking_done s.core w.index)
+      (fun () -> add_t s (run_task s fn))
+  in
+  if s.threaded then run ()
+  else begin
+    Mutex.lock w.aux_m;
+    w.aux_pending <- w.aux_pending @ [run];
+    if
+      w.aux_total - w.aux_busy < List.length w.aux_pending
+      && w.aux_total < Core.slots s.core
+    then begin
+      w.aux_total <- w.aux_total + 1;
+      ignore (Thread.create (fun () -> aux_loop s w) ())
+    end
+    else Condition.signal w.aux_c;
+    Mutex.unlock w.aux_m
+  end
+
+(** How long [stop] waits for a parked task before giving up on it. *)
+let drain_timeout = 5.
+
+(** What the core handed [w], as the handlers to run, in order. The handles are
+    resolved before any of them runs, since running one takes from the core
+    again. *)
+let taken_tasks s w written =
+  let rec decode position acc =
+    if position >= written then List.rev acc
+    else (
+      match Slab.take s.tasks w.taken.(position) with
+        | None -> List.rev acc
+        | Some t ->
+            let fired = fired_events t w.taken position in
+            decode
+              (position + 2 + Array.length t.fds)
+              ((fun () -> t.fire fired) :: acc))
+  in
+  decode 0 []
+
+let dispatch s w =
+  let rec loop () =
+    let result = Core.take s.core w.index w.taken in
+    match (Core.work (result land 7), taken_tasks s w (result lsr 3)) with
+      | `None, _ ->
+          Core.wait s.core w.index;
+          loop ()
+      | `Batch, fns ->
+          List.iter (fun fn -> add_t s (run_task s fn)) fns;
+          loop ()
+      | `One_direct, [fn] ->
+          add_t s (run_task s fn);
+          loop ()
+      | `One_threaded, [fn] ->
+          run_blocking s w fn;
+          loop ()
+      | `Stopped, _ -> ()
+      | `Failed, _ ->
+          s.on_fatal
+            (Failure ("Duppy: event thread failed: " ^ Core.error s.core))
+            (Printexc.get_callstack 0);
+          loop ()
+      | _ -> assert false
+  in
+  loop ()
+
+let wake_auxiliaries s =
+  List.iter
+    (fun w -> Mutex.protect w.aux_m (fun () -> Condition.broadcast w.aux_c))
+    s.workers
+
+(* A lowered budget lets the auxiliary threads above it exit, and a raised one
+   lets idle workers take the blocking tasks they had declined. *)
+let reserve_blocking s =
+  let change n =
+    ignore (Core.reserve s.core n);
+    wake_auxiliaries s
+  in
+  change 1;
+  let released = Atomic.make false in
+  fun () -> if Atomic.compare_and_set released false true then change (-1)
+
+let start ?pool ?(max_blocking = 64) ?(grow_after = 1.) ?log:logger s =
+  if not (Atomic.compare_and_set s.started false true) then
+    failwith "Duppy.start: scheduler already started";
+  s.log <- logger;
+  let every n = List.init (max 1 n) (fun _ _ -> true) in
+  let accepts, initial =
+    match pool with
+      | Some (`Threads accepts) | Some (`Selective_domains accepts) ->
+          (accepts, List.length accepts)
+      | Some (`Domains n) -> (every n, max 1 n)
+      | Some (`Growing (initial, n)) -> (every n, max 1 (min initial n))
+      | None ->
+          let n = Domain.recommended_domain_count () in
+          (every n, n)
+  in
+  s.threaded <- (match pool with Some (`Threads _) -> true | _ -> false);
+  s.selective <-
+    (match pool with
+      | Some (`Threads _) | Some (`Selective_domains _) -> true
+      | _ -> false);
+  let count = List.length accepts in
+  if s.selective && count >= Sys.int_size then
+    invalid_arg "Duppy.start: too many threads";
+  let workers =
+    List.mapi
+      (fun index accepts ->
+        {
+          index;
+          accepts;
+          domain = -1;
+          taken = Array.make 1024 0;
+          blocking = Atomic.make 0;
+          threads = Atomic.make 0;
+          aux_m = Mutex.create ();
+          aux_c = Condition.create ();
+          aux_pending = [];
+          aux_busy = 0;
+          aux_total = 0;
+        })
+      accepts
+  in
+  s.workers <- List.filteri (fun index _ -> index < initial) workers;
+  Core.start_growing s.core count initial max_blocking;
+  (* What was submitted before the pool is ready before any worker looks. *)
+  flush_pending s;
+  let guard fn () =
+    try fn ()
+    with exn ->
+      let bt = Printexc.get_raw_backtrace () in
+      s.on_fatal exn bt
+  in
+  (* The first worker of a domain pool is a thread on the calling domain, which
+     exists anyway and collects only what it allocated itself.
+
+     The parent reads a spawned domain's id directly, so a pin can be validated
+     before the worker has run a single instruction. *)
+  let spawn w =
+    let run = guard (fun () -> dispatch s w) in
+    if s.threaded then `Thread (Thread.create run ())
+    else if w.index = 0 then begin
+      w.domain <- (Domain.self () :> int);
+      `Thread (Thread.create run ())
+    end
+    else (
+      let d = Domain.spawn run in
+      w.domain <- (Domain.get_id d :> int);
+      `Domain d)
+  in
+  s.members <- List.map spawn s.workers;
+  Atomic.set s.running true;
+  flush_pending s;
+  log s (fun () ->
+      if s.threaded then Printf.sprintf "Started %d dispatch threads." count
+      else
+        Printf.sprintf
+          "Started %d dispatch domains (up to %d) on %s, %d blocking tasks."
+          initial count (Core.backend s.core) (Core.slots s.core));
+  (* The core decides when to grow, from how long ready work found every worker
+     busy; spawning a domain needs the runtime, so a thread of ours does it. *)
+  let rec grow () =
+    let index = Core.await_growth s.core grow_after in
+    if index >= 0 then begin
+      Mutex.protect s.grow_m (fun () ->
+          if not (Atomic.get s.stopped) then begin
+            let w = List.nth workers index in
+            s.workers <- s.workers @ [w];
+            s.members <- spawn w :: s.members;
+            log s (fun () ->
+                Printf.sprintf "Grew to %d dispatch domains." (index + 1))
+          end);
+      grow ()
+    end
+  in
+  if initial < count then ignore (Thread.create (guard grow) ())
+
+let least_loaded load = function
+  | [] -> None
+  | first :: rest ->
+      Some
+        (List.fold_left
+           (fun best x ->
+             if Atomic.get (load x) < Atomic.get (load best) then x else best)
+           first rest)
+
+(* Counted from the choice, so that two calls in a row do not pick the same
+   place. *)
+let counted load fn =
+  Atomic.incr load;
+  fun () -> Fun.protect ~finally:(fun () -> Atomic.decr load) fn
+
+let thread ~priority s fn =
+  let in_place () = ignore (Thread.create fn ()) in
+  if s.threaded || not (Atomic.get s.running) then in_place ()
+  else (
+    match
+      least_loaded
+        (fun w -> w.threads)
+        (List.filter (fun w -> w.accepts priority) s.workers)
+    with
+      | None -> in_place ()
+      | Some w ->
+          let job = counted w.threads fn in
+          Task.add ~domain:w.domain s
+            {
+              priority;
+              events = [`Delay 0.];
+              handler =
+                (fun _ ->
+                  ignore (Thread.create job ());
+                  []);
+            })
+
+let stop s =
+  if Atomic.get s.started && not (Atomic.exchange s.stopped true) then begin
+    Core.stop s.core;
+    (* The core dropped the tasks it held, so nothing will ask for their
+       handlers. *)
+    Slab.clear s.tasks;
+    wake_auxiliaries s;
+    (* Let the tasks still parked on the workers finish, bounded because a
+       blocking task is under no obligation to return. *)
+    let deadline = time () +. drain_timeout in
+    while
+      List.exists (fun w -> 0 < Atomic.get w.blocking) s.workers
+      && time () < deadline
+    do
+      Thread.delay 0.01
+    done;
+    (* A domain terminates once every thread created inside it has finished, and
+       a task is free to start one that outlives it: a binding logging from its
+       own thread pins the domain that ran it for good. Reaping is handed to a
+       thread of our own so that waiting for one cannot hold up stopping. *)
+    let join = function
+      | `Domain d -> Domain.join d
+      | `Thread t -> Thread.join t
+    in
+    Mutex.protect s.grow_m (fun () ->
+        List.iter
+          (fun m -> ignore (Thread.create (fun () -> join m) ()))
+          s.members;
+        s.members <- []);
+    List.iter
+      (fun fd -> try Unix.close fd with _ -> ())
+      [s.wake_read; s.wake_write]
+  end
 
 module Async = struct
   (* m is used to make sure that
    * calls to [wake_up] and [stop]
    * are thread-safe. *)
-  type t = { stop : bool ref; mutable fd : fd option; m : Mutex.t }
+  type t = { stop : bool Atomic.t; mutable fd : fd option; m : Mutex.t }
 
   exception Stopped
 
   let add ~priority (scheduler : 'a scheduler) f =
-    (* A pipe to wake up the task *)
-    let out_pipe, in_pipe = Unix.pipe () in
+    (* A socket pair to wake up the task. See [create] for why this is not a
+       pipe. *)
+    let out_pipe, in_pipe = Unix_utils.socketpair () in
     Unix.set_nonblock in_pipe;
-    let stop = ref false in
+    let stop = Atomic.make false in
     let tmp = Bytes.create 1024 in
     let rec task l =
       if List.exists (( = ) (`Read out_pipe)) l then
         (* Consume data from the pipe *)
-        ignore (Unix.read out_pipe tmp 0 1024);
-      if !stop then begin
-        begin
-          try
-            (* This interface is purely asynchronous
-             * so we close both sides of the pipe here. *)
-            Unix.close in_pipe;
-            Unix.close out_pipe
-          with _ -> ()
+        ignore (Unix_utils.read out_pipe tmp 0 1024);
+      if Atomic.get stop then begin
+        begin try
+          (* This interface is purely asynchronous
+           * so we close both sides of the pipe here. *)
+          Unix.close in_pipe;
+          Unix.close out_pipe
+        with _ -> ()
         end;
         []
       end
@@ -424,16 +844,15 @@ module Async = struct
   let wake_up t =
     Mutex.lock t.m;
     try
-      begin
-        match t.fd with
-          | Some t -> (
-              try ignore (Unix.write t (Bytes.of_string " ") 0 1)
-              with
-              | Unix.Unix_error (Unix.EAGAIN, _, _)
-              | Unix.Unix_error (Unix.EWOULDBLOCK, _, _)
-              ->
-                ())
-          | None -> raise Stopped
+      begin match t.fd with
+        | Some t -> (
+            try ignore (Unix_utils.write t (Bytes.of_string " ") 0 1)
+            with
+            | Unix.Unix_error (Unix.EAGAIN, _, _)
+            | Unix.Unix_error (Unix.EWOULDBLOCK, _, _)
+            ->
+              ())
+        | None -> raise Stopped
       end;
       Mutex.unlock t.m
     with e ->
@@ -443,12 +862,11 @@ module Async = struct
   let stop t =
     Mutex.lock t.m;
     try
-      begin
-        match t.fd with
-          | Some c ->
-              t.stop := true;
-              ignore (Unix.write c (Bytes.of_string " ") 0 1)
-          | None -> raise Stopped
+      begin match t.fd with
+        | Some c ->
+            Atomic.set t.stop true;
+            ignore (Unix_utils.write c (Bytes.of_string " ") 0 1)
+        | None -> raise Stopped
       end;
       t.fd <- None;
       Mutex.unlock t.m
@@ -460,65 +878,57 @@ end
 module type Transport_t = sig
   type t
 
-  type bigarray =
-    (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
-
   val sock : t -> Unix.file_descr
+  val pending : t -> bool
   val read : t -> Bytes.t -> int -> int -> int
   val write : t -> Bytes.t -> int -> int -> int
-  val ba_write : t -> bigarray -> int -> int -> int
 end
 
 module Unix_transport : Transport_t with type t = Unix.file_descr = struct
   type t = Unix.file_descr
 
-  type bigarray =
-    (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
-
   let sock s = s
-  let read = Unix.read
-  let write = Unix.write
-
-  external ba_write : t -> bigarray -> int -> int -> int
-    = "ocaml_duppy_write_ba"
+  let pending _ = false
+  let read = Unix_utils.read
+  let write = Unix_utils.write
 end
 
 module type Io_t = sig
   type socket
   type marker = Length of int | Split of string
 
-  type bigarray =
-    (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
-
   type failure =
     | Io_error
-    | Unix of Unix.error * string * string
-    | Unknown of exn
+    | Unix of (Unix.error * string * string * Printexc.raw_backtrace)
+    | Unknown of exn * Printexc.raw_backtrace
     | Timeout
 
-  val read :
-    ?recursive:bool ->
-    ?init:string ->
-    ?on_error:(string * failure -> unit) ->
-    ?timeout:float ->
-    priority:'a ->
-    'a scheduler ->
-    socket ->
-    marker ->
-    (string * string option -> unit) ->
-    unit
+  (** Raised by [read] and [write]. On a read, whatever had been read before the
+      failure is left in the handle's [data]. *)
+  exception Error of failure
+
+  (** [data] holds what a read consumed past its marker, which the next read on
+      the same socket picks up. *)
+  type 'a handle = {
+    scheduler : 'a scheduler;
+    socket : socket;
+    mutable data : string;
+  }
+
+  val handle : 'a scheduler -> socket -> 'a handle
+
+  (** [read ?timeout ~priority h marker] returns the data up to [marker],
+      parking the computation until enough has arrived. [timeout] applies to
+      each wait rather than to the call. *)
+  val read : ?timeout:float -> priority:'a -> 'a handle -> marker -> string
 
   val write :
-    ?exec:(unit -> unit) ->
-    ?on_error:(failure -> unit) ->
-    ?bigarray:bigarray ->
+    ?timeout:float ->
     ?offset:int ->
     ?length:int ->
-    ?string:Bytes.t ->
-    ?timeout:float ->
     priority:'a ->
-    'a scheduler ->
-    socket ->
+    'a handle ->
+    Bytes.t ->
     unit
 end
 
@@ -529,577 +939,174 @@ struct
 
   type failure =
     | Io_error
-    | Unix of Unix.error * string * string
-    | Unknown of exn
+    | Unix of (Unix.error * string * string * Printexc.raw_backtrace)
+    | Unknown of exn * Printexc.raw_backtrace
     | Timeout
 
-  exception Io
-  exception Timeout_exc
+  exception Error of failure
 
-  type bigarray =
-    (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
+  type 'a handle = {
+    scheduler : 'a scheduler;
+    socket : socket;
+    mutable data : string;
+  }
 
-  let read ?(recursive = false) ?(init = "") ?(on_error = fun _ -> ()) ?timeout
-      ~priority (scheduler : 'a scheduler) socket marker exec =
+  let handle scheduler socket = { scheduler; socket; data = "" }
+
+  (** Split a buffer at [marker], returning what precedes it and what follows,
+      or [None] while the marker has not arrived. The marker is resolved once so
+      that a [Split] pattern is compiled per read rather than per chunk. *)
+  let matcher = function
+    | Split r ->
+        let rex = Pcre.regexp r in
+        let rec find = function
+          | Pcre.Text s :: Pcre.Delim _ :: rest ->
+              let rem = Buffer.create 10 in
+              List.iter
+                (function
+                  | Pcre.Text s | Pcre.Delim s -> Buffer.add_string rem s
+                  | _ -> ())
+                rest;
+              Some (s, Buffer.contents rem)
+          | _ :: rest -> find rest
+          | [] -> None
+        in
+        fun buffer ->
+          find (Pcre.full_split ~max:2 ~rex (Buffer.contents buffer))
+    | Length n ->
+        fun buffer ->
+          if n <= Buffer.length buffer then
+            Some
+              ( Buffer.sub buffer 0 n,
+                Buffer.sub buffer n (Buffer.length buffer - n) )
+          else None
+
+  let wait_events ~timeout socket =
+    match timeout with
+      | None -> ([`Read socket], fun _ -> false)
+      | Some t -> ([`Read socket; `Delay t], List.mem (`Delay t))
+
+  let read ?timeout ~priority h marker =
     let length = 1024 in
-    let b = Buffer.create length in
+    let buffer = Buffer.create length in
     let buf = Bytes.make length ' ' in
-    Buffer.add_string b init;
-    let unix_socket = Transport.sock socket in
-    let events, check_timeout =
-      match timeout with
-        | None -> ([`Read unix_socket], fun _ -> false)
-        | Some f -> ([`Read unix_socket; `Delay f], List.mem (`Delay f))
+    Buffer.add_string buffer h.data;
+    h.data <- "";
+    let socket = Transport.sock h.socket in
+    let events, timed_out = wait_events ~timeout socket in
+    let take = matcher marker in
+    let fail failure =
+      h.data <- Buffer.contents buffer;
+      raise (Error failure)
     in
-    let rec f l =
-      if check_timeout l then raise Timeout_exc;
-      if List.mem (`Read unix_socket) l then begin
-        let input = Transport.read socket buf 0 length in
-        if input <= 0 then raise Io;
-        Buffer.add_subbytes b buf 0 input
-      end;
-      let ret =
-        match marker with
-          | Split r ->
-              let rex = Pcre.regexp r in
-              let acc = Buffer.contents b in
-              let ret = Pcre.full_split ~max:2 ~rex acc in
-              let rec p l =
-                match l with
-                  | Pcre.Text x :: Pcre.Delim _ :: l ->
-                      let f b x =
-                        match x with
-                          | Pcre.Text s | Pcre.Delim s -> Buffer.add_string b s
-                          | _ -> ()
-                      in
-                      if recursive then begin
-                        Buffer.reset b;
-                        List.iter (f b) l;
-                        Some (x, None)
-                      end
-                      else begin
-                        let b = Buffer.create 10 in
-                        List.iter (f b) l;
-                        Some (x, Some (Buffer.contents b))
-                      end
-                  | _ :: l' -> p l'
-                  | [] -> None
-              in
-              p ret
-          | Length n when n <= Buffer.length b ->
-              let s = Buffer.sub b 0 n in
-              let rem = Buffer.sub b n (Buffer.length b - n) in
-              if recursive then begin
-                Buffer.reset b;
-                Buffer.add_string b rem;
-                Some (s, None)
-              end
-              else Some (s, Some rem)
-          | _ -> None
-      in
-      (* Catch all exceptions.. *)
-      let f x =
-        try f x with
-          | Io ->
-              on_error (Buffer.contents b, Io_error);
-              []
-          | Timeout_exc ->
-              on_error (Buffer.contents b, Timeout);
-              []
-          | Unix.Unix_error (x, y, z) ->
-              on_error (Buffer.contents b, Unix (x, y, z));
-              []
-          | e ->
-              on_error (Buffer.contents b, Unknown e);
-              []
-      in
-      match ret with
-        | Some x -> (
-            match x with
-              | s, Some _ when recursive ->
-                  exec (s, None);
-                  [{ priority; events; handler = f }]
-              | _ ->
-                  exec x;
-                  [])
-        | None -> [{ priority; events; handler = f }]
+    let rec loop () =
+      match take buffer with
+        | Some (s, rem) ->
+            h.data <- rem;
+            s
+        | None ->
+            if not (Transport.pending h.socket) then (
+              let fired = await ~priority h.scheduler events in
+              if timed_out fired then fail Timeout);
+            let n =
+              try Transport.read h.socket buf 0 length with
+                | Unix.Unix_error (x, y, z) ->
+                    fail (Unix (x, y, z, Printexc.get_raw_backtrace ()))
+                | e -> fail (Unknown (e, Printexc.get_raw_backtrace ()))
+            in
+            if n <= 0 then fail Io_error;
+            Buffer.add_subbytes buffer buf 0 n;
+            loop ()
     in
-    (* Catch all exceptions.. *)
-    let f x =
-      try f x with
-        | Io ->
-            on_error (Buffer.contents b, Io_error);
-            []
-        | Timeout_exc ->
-            on_error (Buffer.contents b, Timeout);
-            []
-        | Unix.Unix_error (x, y, z) ->
-            on_error (Buffer.contents b, Unix (x, y, z));
-            []
-        | e ->
-            on_error (Buffer.contents b, Unknown e);
-            []
-    in
-    (* First one is without read,
-     * in case init contains the wanted match.
-     * Unless the user sets timeout to 0., this
-     * should not interfer with user-defined timeout.. *)
-    let task =
-      { priority; events = [`Delay 0.; `Read unix_socket]; handler = f }
-    in
-    add scheduler task
+    loop ()
 
-  let write ?(exec = fun () -> ()) ?(on_error = fun _ -> ()) ?bigarray
-      ?(offset = 0) ?length ?string ?timeout ~priority
-      (scheduler : 'a scheduler) socket =
-    let length, write =
-      match (string, bigarray) with
-        | Some s, _ ->
-            let length =
-              match length with Some length -> length | None -> Bytes.length s
-            in
-            (length, Transport.write socket s)
-        | None, Some b ->
-            let length =
-              match length with
-                | Some length -> length
-                | None -> Bigarray.Array1.dim b
-            in
-            (length, Transport.ba_write socket b)
-        | _ -> (0, fun _ _ -> 0)
-    in
-    let unix_socket = Transport.sock (socket : Transport.t) in
-    let exec () =
-      if Sys.os_type = "Win32" then Unix.clear_nonblock unix_socket;
-      exec ()
-    in
-    let events, check_timeout =
+  let write ?timeout ?(offset = 0) ?length ~priority h data =
+    let len = match length with Some len -> len | None -> Bytes.length data in
+    let socket = Transport.sock h.socket in
+    let events, timed_out =
       match timeout with
-        | None -> ([`Write unix_socket], fun _ -> false)
-        | Some f -> ([`Write unix_socket; `Delay f], List.mem (`Delay f))
+        | None -> ([`Write socket], fun _ -> false)
+        | Some t -> ([`Write socket; `Delay t], List.mem (`Delay t))
     in
-    let rec f pos l =
-      try
-        if check_timeout l then raise Timeout_exc;
-        assert (List.exists (( = ) (`Write unix_socket)) l);
-        let len = length - pos in
-        let n = write pos len in
-        if n <= 0 then (
-          on_error Io_error;
-          [])
-        else if n < len then
-          [{ priority; events = [`Write unix_socket]; handler = f (pos + n) }]
-        else (
-          exec ();
-          [])
-      with
-        | Unix.Unix_error (Unix.EWOULDBLOCK, _, _) when Sys.os_type = "Win32" ->
-            [{ priority; events = [`Write unix_socket]; handler = f pos }]
-        | Timeout_exc ->
-            on_error Timeout;
-            []
-        | Unix.Unix_error (x, y, z) ->
-            on_error (Unix (x, y, z));
-            []
-        | e ->
-            on_error (Unknown e);
-            []
+    (* Win32 blocks on a blocking socket rather than accepting a partial write,
+       and does not report writability while the socket still has room: there
+       the socket goes non-blocking and we write as much as it takes. *)
+    let win32 = Sys.os_type = "Win32" in
+    let restore () = if win32 then Unix.clear_nonblock socket in
+    let fail failure =
+      restore ();
+      raise (Error failure)
     in
-    let task = { priority; events; handler = f offset } in
-    if length > 0 then
-      (* Win32 is particularly bad with writting on sockets. It is nearly impossible
-       * to write proper non-blocking code. send will block on blocking sockets if
-       * there isn't enough data available instead of returning a partial buffer
-       * and WSAEventSelect will not return if the socket still has available space.
-       * Thus, setting the socket to non-blocking and writting as much as we can. *)
-      if Sys.os_type = "Win32" then begin
-        Unix.set_nonblock unix_socket;
-        List.iter (add scheduler) (f offset [`Write unix_socket])
+    let wait () =
+      let fired = await ~priority h.scheduler events in
+      if timed_out fired then fail Timeout
+    in
+    if win32 then Unix.set_nonblock socket;
+    let rec loop pos =
+      if pos < len then begin
+        if not win32 then wait ();
+        let n =
+          try Transport.write h.socket data pos (len - pos) with
+            | Unix.Unix_error (Unix.EWOULDBLOCK, _, _) when win32 ->
+                wait ();
+                -1
+            | Unix.Unix_error (x, y, z) ->
+                fail (Unix (x, y, z, Printexc.get_raw_backtrace ()))
+            | e -> fail (Unknown (e, Printexc.get_raw_backtrace ()))
+        in
+        if n = 0 then fail Io_error;
+        loop (pos + max 0 n)
       end
-      else add scheduler task
-    else exec ()
+    in
+    loop offset;
+    restore ()
 end
 
 module Io : Io_t with type socket = Unix.file_descr = MakeIo (Unix_transport)
 
-(** A monad for implicit continuations or responses *)
-module Monad = struct
-  type ('a, 'b) handler = { return : 'a -> unit; raise : 'b -> unit }
-  type ('a, 'b) t = ('a, 'b) handler -> unit
+module Condition = struct
+  type t = {
+    mutex : Mutex.t;
+    changed : Stdlib.Condition.t;
+    parked : (unit -> unit) list Atomic.t;
+  }
 
-  let return x h = h.return x
-  let raise x h = h.raise x
-
-  let bind f g h =
-    let ret x =
-      let process = g x in
-      process h
-    in
-    f { return = ret; raise = h.raise }
-
-  let ( >>= ) = bind
-  let run ~return:ret ~raise f = f { return = ret; raise }
-
-  let catch f g h =
-    let raise x =
-      let process = g x in
-      process h
-    in
-    f { return = h.return; raise }
-
-  let ( =<< ) x y = catch y x
-
-  let rec fold_left f a = function
-    | [] -> a
-    | b :: l -> fold_left f (bind a (fun a -> f a b)) l
-
-  let fold_left f a l = fold_left f (return a) l
-  let iter f l = fold_left (fun () b -> f b) () l
-
-  module Mutex_o = Mutex
-
-  module Mutex = struct
-    module type Mutex_control = sig
-      type priority
-
-      val scheduler : priority scheduler
-      val priority : priority
-    end
-
-    module type Mutex_t = sig
-      (** Type for a mutex. *)
-      type mutex
-
-      module Control : Mutex_control
-
-      (** [create ()] creates a mutex. Implementation-wise,
-        * a duppy task is created that will be used to select a
-        * waiting computation, lock the mutex on it and resume it.
-        * Thus, [priority] and [s] represents, resp., the priority
-        * and scheduler used when running calling process' computation. *)
-      val create : unit -> mutex
-
-      (** A computation that locks a mutex
-        * and returns [unit] afterwards. Computation
-        * will be blocked until the mutex is sucessfuly locked. *)
-      val lock : mutex -> (unit, 'a) t
-
-      (** A computation that tries to lock a mutex.
-        * Returns immediatly [true] if the mutex was sucesfully locked
-        * or [false] otherwise. *)
-      val try_lock : mutex -> (bool, 'a) t
-
-      (** A computation that unlocks a mutex.
-        * Should return immediatly. *)
-      val unlock : mutex -> (unit, 'a) t
-    end
-
-    module Factory (Control : Mutex_control) = struct
-      (* A mutex is either locked or not
-       * and has a list of tasks waiting to get
-       * it. *)
-      type mutex = {
-        mutable locked : bool;
-        mutable tasks : (unit -> unit) list;
-      }
-
-      module Control = Control
-
-      let tmp = Bytes.create 1024
-      let x, y = Unix.pipe ()
-      let stop = ref false
-      let wake_up () = ignore (Unix.write y (Bytes.of_string " ") 0 1)
-      let ctl_m = Mutex_o.create ()
-
-      let finalise _ =
-        stop := true;
-        wake_up ()
-
-      let mutexes = Queue.create ()
-      let () = Gc.finalise finalise mutexes
-
-      let register () =
-        let m = { locked = false; tasks = [] } in
-        Queue.push m mutexes;
-        m
-
-      let cleanup m =
-        Mutex_o.lock ctl_m;
-        let q = Queue.create () in
-        Queue.iter (fun m' -> if m <> m' then Queue.push m q) mutexes;
-        Queue.clear mutexes;
-        Queue.transfer q mutexes;
-        Mutex_o.unlock ctl_m
-
-      let task f =
-        {
-          Task.priority = Control.priority;
-          events = [`Delay 0.];
-          handler =
-            (fun _ ->
-              f ();
-              []);
-        }
-
-      (* This should only be called when [ctl_m] is locked. *)
-      let process_mutex tasks m =
-        if not m.locked then (
-          (* I don't think shuffling tasks
-           * matters here.. *)
-          match m.tasks with
-            | x :: l ->
-                m.tasks <- l;
-                m.locked <- true;
-                task x :: tasks
-            | _ -> tasks)
-        else tasks
-
-      let rec handler _ =
-        Mutex_o.lock ctl_m;
-        if not !stop then begin
-          let tasks = Queue.fold process_mutex [] mutexes in
-          Mutex_o.unlock ctl_m;
-          ignore (Unix.read x tmp 0 1024);
-          { Task.priority = Control.priority; events = [`Read x]; handler }
-          :: tasks
-        end
-        else begin
-          Mutex_o.unlock ctl_m;
-          try
-            Unix.close x;
-            Unix.close y;
-            []
-          with _ -> []
-        end
-
-      let () =
-        Task.add Control.scheduler
-          { Task.priority = Control.priority; events = [`Read x]; handler }
-
-      let create () =
-        Mutex_o.lock ctl_m;
-        let ret = register () in
-        Mutex_o.unlock ctl_m;
-        Gc.finalise cleanup ret;
-        ret
-
-      let lock m h' =
-        Mutex_o.lock ctl_m;
-        if not m.locked then begin
-          m.locked <- true;
-          Mutex_o.unlock ctl_m;
-          h'.return ()
-        end
-        else begin
-          m.tasks <- h'.return :: m.tasks;
-          Mutex_o.unlock ctl_m
-        end
-
-      let try_lock m h' =
-        Mutex_o.lock ctl_m;
-        if not m.locked then begin
-          m.locked <- true;
-          Mutex_o.unlock ctl_m;
-          h'.return true
-        end
-        else begin
-          Mutex_o.unlock ctl_m;
-          h'.return false
-        end
-
-      let unlock m h' =
-        Mutex_o.lock ctl_m;
-        (* Here we allow inter-thread
-         * and double unlock.. Double unlock
-         * is not necessarily a problem and
-         * inter-thread unlock well.. what is
-         * a thread here ?? :-) *)
-        m.locked <- false;
-        let wake = m.tasks <> [] in
-        Mutex_o.unlock ctl_m;
-        if wake then wake_up ();
-        h'.return ()
-    end
-  end
-
-  module Condition = struct
-    module Factory (Mutex : Mutex.Mutex_t) = struct
-      type condition = {
-        condition_m : Mutex_o.t;
-        waiting : (unit -> unit) Queue.t;
-      }
-
-      module Control = Mutex.Control
-
-      let create () =
-        { condition_m = Mutex_o.create (); waiting = Queue.create () }
-
-      (* Mutex.unlock m needs to happen _after_
-       * the task has been registered. *)
-      let wait c m h =
-        let proc () = Mutex.lock m h in
-        Mutex_o.lock c.condition_m;
-        Queue.push proc c.waiting;
-        Mutex_o.unlock c.condition_m;
-        (* Mutex.unlock does not raise exceptions (for now..) *)
-        let h' = { return = (fun () -> ()); raise = (fun _ -> assert false) } in
-        Mutex.unlock m h'
-
-      let wake_up h =
-        let handler _ =
-          h ();
-          []
-        in
-        Task.add Control.scheduler
-          { Task.priority = Control.priority; events = [`Delay 0.]; handler }
-
-      let signal c h =
-        Mutex_o.lock c.condition_m;
-        let h' = Queue.pop c.waiting in
-        Mutex_o.unlock c.condition_m;
-        wake_up h';
-        h.return ()
-
-      let broadcast c h =
-        let q = Queue.create () in
-        Mutex_o.lock c.condition_m;
-        Queue.transfer c.waiting q;
-        Mutex_o.unlock c.condition_m;
-        Queue.iter wake_up q;
-        h.return ()
-    end
-  end
-
-  module type Monad_io_t = sig
-    type socket
-
-    module Io : Io_t with type socket = socket
-
-    type ('a, 'b) handler = {
-      scheduler : 'a scheduler;
-      socket : Io.socket;
-      mutable data : string;
-      on_error : Io.failure -> 'b;
+  let create () =
+    {
+      mutex = Mutex.create ();
+      changed = Stdlib.Condition.create ();
+      parked = Atomic.make [];
     }
 
-    val exec :
-      ?delay:float ->
-      priority:'a ->
-      ('a, 'b) handler ->
-      ('c, 'b) t ->
-      ('c, 'b) t
+  let signal c =
+    Mutex.protect c.mutex (fun () -> Stdlib.Condition.broadcast c.changed);
+    List.iter (fun resume -> resume ()) (Atomic.exchange c.parked [])
 
-    val delay : priority:'a -> ('a, 'b) handler -> float -> (unit, 'b) t
+  let rec remember c resume =
+    let parked = Atomic.get c.parked in
+    if not (Atomic.compare_and_set c.parked parked (resume :: parked)) then
+      remember c resume
 
-    val read :
-      ?timeout:float ->
-      priority:'a ->
-      marker:Io.marker ->
-      ('a, 'b) handler ->
-      (string, 'b) t
+  let block c ready =
+    Mutex.protect c.mutex (fun () ->
+        while not (ready ()) do
+          Stdlib.Condition.wait c.changed c.mutex
+        done)
 
-    val read_all :
-      ?timeout:float ->
-      priority:'a ->
-      'a scheduler ->
-      Io.socket ->
-      (string, string * Io.failure) t
+  (* The resumer is remembered before the condition is checked again: a signal
+     sent in between either finds it or is seen by the check. *)
+  let park ~priority s c ready =
+    while not (ready ()) do
+      suspend ~priority s (fun resume ->
+          let resumed = Atomic.make false in
+          let resume () =
+            if Atomic.compare_and_set resumed false true then resume ()
+          in
+          remember c resume;
+          if ready () then resume ())
+    done
 
-    val write :
-      ?timeout:float ->
-      priority:'a ->
-      ('a, 'b) handler ->
-      ?offset:int ->
-      ?length:int ->
-      Bytes.t ->
-      (unit, 'b) t
-
-    val write_bigarray :
-      ?timeout:float ->
-      priority:'a ->
-      ('a, 'b) handler ->
-      Io.bigarray ->
-      (unit, 'b) t
-  end
-
-  module MakeIo (Io : Io_t) = struct
-    type socket = Io.socket
-
-    module Io = Io
-
-    type ('a, 'b) handler = {
-      scheduler : 'a scheduler;
-      socket : Io.socket;
-      mutable data : string;
-      on_error : Io.failure -> 'b;
-    }
-
-    let exec ?(delay = 0.) ~priority h f h' =
-      let handler _ =
-        begin
-          try f h' with e -> h'.raise (h.on_error (Io.Unknown e))
-        end;
-        []
-      in
-      Task.add h.scheduler { Task.priority; events = [`Delay delay]; handler }
-
-    let delay ~priority h delay = exec ~delay ~priority h (return ())
-
-    let read ?timeout ~priority ~marker h h' =
-      let process x =
-        let s =
-          match x with
-            | s, None ->
-                h.data <- "";
-                s
-            | s, Some s' ->
-                h.data <- s';
-                s
-        in
-        h'.return s
-      in
-      let init = h.data in
-      h.data <- "";
-      let on_error (s, x) =
-        h.data <- s;
-        h'.raise (h.on_error x)
-      in
-      Io.read ?timeout ~priority ~init ~recursive:false ~on_error h.scheduler
-        h.socket marker process
-
-    let read_all ?timeout ~priority s sock =
-      let handler =
-        { scheduler = s; socket = sock; data = ""; on_error = (fun e -> e) }
-      in
-      let buf = Buffer.create 1024 in
-      let rec f () =
-        let data = read ?timeout ~priority ~marker:(Io.Length 1024) handler in
-        let process data =
-          Buffer.add_string buf data;
-          f ()
-        in
-        data >>= process
-      in
-      let catch_ret e =
-        Buffer.add_string buf handler.data;
-        match e with
-          | Io.Io_error -> return (Buffer.contents buf)
-          | e -> raise (Buffer.contents buf, e)
-      in
-      catch (f ()) catch_ret
-
-    let write ?timeout ~priority h ?offset ?length s h' =
-      let on_error x = h'.raise (h.on_error x) in
-      let exec () = h'.return () in
-      Io.write ?timeout ~priority ~on_error ~exec ?offset ?length ~string:s
-        h.scheduler h.socket
-
-    let write_bigarray ?timeout ~priority h ba h' =
-      let on_error x = h'.raise (h.on_error x) in
-      let exec () = h'.return () in
-      Io.write ?timeout ~priority ~on_error ~exec ~bigarray:ba h.scheduler
-        h.socket
-  end
-
-  module Io = MakeIo (Io)
+  let wait ~priority s c ready =
+    try park ~priority s c ready
+    with Effect.Unhandled (Await _) -> block c ready
 end

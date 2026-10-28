@@ -22,8 +22,8 @@
 
 (** Advanced scheduler and monad for server-oriented programming. *)
 
-(**  
-    * {R {i {v 
+(**
+    * {R {i {v
     *        The bars could not hold me;
     *        Force could not control me now.
     *        They try to keep me down, yeah!
@@ -31,135 +31,274 @@
     *        (...)
     *        Let me tell you this -
     *        I'm a duppy conqueror !
-    *        v}  }  } 
+    *        v}  }  }
     * {R {b Lee "Scratch" Perry & Bob Marley - Duppy conqueror }}
     *
     * {2 Duppy task scheduler for OCaml.}
     *
-    * {!Duppy} is a task scheduler for ocaml. It implements a wrapper 
-    * around [Unix.select].
-    * 
-    * Using {!Duppy.Task}, the programmer can easily submit tasks that need to wait 
+    * {!Duppy} is a task scheduler for ocaml. It implements a wrapper
+    * around the platform's readiness call: [epoll] or [kqueue], and
+    * [poll] elsewhere. SPEC.md states what it guarantees.
+    *
+    * Using {!Duppy.Task}, the programmer can easily submit tasks that need to wait
     * on a socket even, or for a given timeout (possibly zero).
     *
     * With {!Duppy.Async}, one can use a scheduler to submit asynchronous tasks.
     *
     * {!Duppy.Io} implements recursive easy reading and writing to a [Unix.file_descr]
     *
-    * Finally, {!Duppy.Monad} and {!Duppy.Monad.Io} provide a monadic interface to
-    * program server code that with an implicit return/reply execution flow.
+    * Finally, {!Duppy.run} lets a computation park on its events in direct
+    * style instead of splitting into tasks.
     *
-    * The scheduler can use several queues running concurently, each queue 
-    * processing ready tasks. Of course, a queue should run in its own thread.*)
+    * The scheduler runs a pool of domains, one per core: a task is dispatched
+    * onto whichever domain is free when it becomes ready. It can also run a
+    * pool of threads instead, for a program that must not run tasks in
+    * parallel.*)
 
-(** A scheduler is a device for processing tasks. Several queues might run in
-  * different threads, processing one scheduler's tasks. 
-  *
-  * ['a] is the type of objects used for priorities. *)
+(** A scheduler is a device for processing tasks. * * ['a] is the type of
+    objects used for priorities. *)
 type 'a scheduler
 
-(** Initiate a new scheduler 
-  * @param compare the comparison function used to sort tasks according to priorities. 
-  * Works as in [List.sort] *)
+(** How a task is run. A worker is one domain of the pool; on a thread pool,
+    where a worker is a thread, [`Threaded] tasks run in place.
+
+    [`Immediate]: a worker takes every ready one as a single batch and runs them
+    in sequence on its own thread. No hand-off, no auxiliary thread, no slot of
+    [max_blocking]. Nothing else is dispatched by that worker until the batch
+    ends, so one task that blocks holds up the rest of the batch and the worker.
+    A worker alternates a batch with one task of another class, so a ready list
+    that refills as fast as it drains does not starve the others.
+
+    [`Direct]: a worker takes one and runs it on its own thread. No hand-off, no
+    auxiliary thread, no slot of [max_blocking], so it is taken even when every
+    slot is in use. The worker dispatches nothing else until it returns. Ready
+    ones are taken one per worker and so spread over the pool. The worker's
+    auxiliary threads share its domain lock, and may be given it while the task
+    runs.
+
+    [`Threaded]: a worker hands one to an auxiliary thread of its domain and
+    goes back to dispatching. When the task parks in a syscall the runtime lock
+    is released and the domain keeps running. Each holds a slot of
+    [max_blocking] until it returns; with none left the workers decline them,
+    and they wait for a slot.
+
+    Among ready [`Direct] and [`Threaded] tasks a worker takes one of the lowest
+    [rank], and among those the one that became ready first.
+
+    {3 Choosing a class}
+
+    Which work goes where belongs to the application. As a starting point:
+
+    - [`Immediate] for reads and writes on descriptors known not to block, and
+      for bookkeeping that only wakes something else.
+    - [`Direct] for work that is time-sensitive and has to run ahead of the
+      rest, such as a clock, and for work whose duration is predictable and
+      large enough to be worth a scheduling step of its own.
+    - [`Threaded] for everything that may block or run long for any reason: disk
+      and network calls, loops sized by their data. It is the default because a
+      task wrongly placed here costs a hand-off, while one wrongly placed in the
+      other two stalls a worker. *)
+type execution_class = [ `Immediate | `Direct | `Threaded ]
+
+(** Wraps every task body. Effect handlers do not cross the thread a task is
+    dispatched to, so a caller whose tasks need one installs it here rather than
+    at each of its own entry points. *)
+type wrapper = { wrap : 'a. (unit -> 'a) -> 'a }
+
+exception Unknown_domain of int
+
+(** Initiate a new scheduler. It has no domains until [start] is called.
+  * @param on_error called when a task raises.
+  * @param on_fatal called when the event loop itself crashes, which should be
+  * considered a MAJOR FAILURE: all non-ready tasks are dropped. Default: print
+  * the backtrace and exit.
+  * @param rank the urgency of a priority, lowest first, between [0] and [63].
+  * Default: [fun _ -> 0]
+  * @param classify how each priority is run. Default: [fun _ -> `Threaded]
+  * @param wrapper wraps every task body. Default: run it as is *)
 val create :
   ?on_error:(exn -> Printexc.raw_backtrace -> unit) ->
-  ?compare:('a -> 'a -> int) ->
+  ?on_fatal:(exn -> Printexc.raw_backtrace -> unit) ->
+  ?rank:('a -> int) ->
+  ?classify:('a -> execution_class) ->
+  ?wrapper:wrapper ->
   unit ->
   'a scheduler
 
-(** Internal polling function. Uses `Unix.select` on windows and
-    `poll` otherwise. *)
-val poll :
-  Unix.file_descr list ->
-  Unix.file_descr list ->
-  Unix.file_descr list ->
-  float ->
-  Unix.file_descr list * Unix.file_descr list * Unix.file_descr list
-
-(** [queue ~log ~priorities s name] 
- * starts a queue, on the scheduler [s] only processing priorities [p]
- * for which [priorities p] returns [true].
- *
- * Several queues can be run concurrently against [s]. 
- * @param log Logging function. Default: [Printf.printf "queue %s: %s\n" name]
- * @param priorities Predicate specifying which priority to process. Default: [fun _ -> _ -> true]
- *
- * An exception is raised from this call when duppy's event loops has
- * crashed. This exception should be considered a MAJOR FAILURE. All current 
- * non-ready tasks registered for the calling scheduler are dropped. You may
- * restart Duppy's queues after it is raised but it should only be used to terminate
- * the process diligently!! *)
-val queue :
+(** [start s] spawns the scheduler's pool, and the thread that waits for
+  * events, which is not a domain and runs no OCaml code. Raises [Failure] if
+  * [s] is already started.
+  *
+  * With [`Domains n], the pool is [n] workers on [n] domains, the calling
+  * domain being the first of them: [n - 1] domains are spawned. Tasks run in
+  * parallel. Spawning a domain makes [Unix.fork] fail from then on, so with
+  * [n > 1] this must be called after any daemonization.
+  *
+  * With [`Selective_domains accepts], the pool is likewise one worker and one
+  * domain per predicate, each taking only the tasks whose priority it accepts.
+  * The first predicate is the calling domain's: one that refuses everything
+  * keeps that domain out of the pool.
+  *
+  * With [`Threads accepts], the pool is one systhread per predicate, each
+  * taking only the tasks whose priority it accepts, and a [`Threaded] task runs
+  * in place on the thread that took it. Nothing runs in parallel and
+  * [Unix.fork] stays usable.
+  * With [`Growing (initial, n)], the pool starts as [`Domains initial] and
+  * adds a domain, up to [n], each time ready work has found every worker
+  * busy for [grow_after] seconds. It never shrinks.
+  *
+  * @param pool Default: [`Domains (Domain.recommended_domain_count ())]
+  * @param max_blocking the most [`Threaded] tasks that may be in flight at
+  * once over the whole pool, whichever workers took them. Unused by a thread
+  * pool. Default: [64]
+  * @param grow_after Seconds of saturation before a growing pool adds a
+  * domain. Default: [1.]
+  * @param log Logging function. Default: no logging *)
+val start :
+  ?pool:
+    [ `Domains of int
+    | `Growing of int * int
+    | `Selective_domains of ('a -> bool) list
+    | `Threads of ('a -> bool) list ] ->
+  ?max_blocking:int ->
+  ?grow_after:float ->
   ?log:(string -> unit) ->
-  ?priorities:('a -> bool) ->
   'a scheduler ->
-  string ->
   unit
 
-(** Stop all queues running on that scheduler and wait for them to return. *)
+(** Whether [start] has been called. *)
+val started : 'a scheduler -> bool
+
+(** Stop the scheduler, let the tasks already running finish, and wait for its
+    domains to return. *)
 val stop : 'a scheduler -> unit
 
-(** Core task registration.
-  *
-  * A task will be a set of events to watch, and a corresponding function to
-  * execute when one of the events is trigered.
-  * 
-  * The executed function may then return a list of new tasks to schedule. *)
+(** [reserve_blocking s] adds one slot to the [`Threaded] budget set by
+    [max_blocking] and returns the function giving it back. A task that may park
+    for as long as a resource it owns lives takes one, so that it cannot starve
+    the others. Auxiliary threads above a lowered budget exit once idle. *)
+val reserve_blocking : 'a scheduler -> unit -> unit
+
+(** Core task registration. * * A task will be a set of events to watch, and a
+    corresponding function to * execute when one of the events is triggered. * *
+    The executed function may then return a list of new tasks to schedule. *)
 module Task : sig
-  (** A task is a list of events awaited,
-    * and a function to process events that have occured.
-    *
-    * The ['a] parameter is the type of priorities, ['b] will be a subset of possible
-    * events. *)
+  (** A task is a list of events awaited, * and a function to process events
+      that have occurred. * * The ['a] parameter is the type of priorities, ['b]
+      will be a subset of possible * events. *)
   type ('a, 'b) task = {
     priority : 'a;
     events : 'b list;
     handler : 'b list -> ('a, 'b) task list;
   }
 
-  (** Type for possible events. 
-    *
-    * Please not that currently, under win32, all socket used in ocaml-duppy 
-    * are expected to be in blocking mode only! *)
+  (** Type for possible events. * * Please not that currently, under win32, all
+      socket used in ocaml-duppy * are expected to be in blocking mode only! *)
   type event =
-    [ `Delay of float
-    | `Write of Unix.file_descr
-    | `Read of Unix.file_descr
-    | `Exception of Unix.file_descr ]
+    [ `Delay of float | `Write of Unix.file_descr | `Read of Unix.file_descr ]
 
-  (** Schedule a task. *)
-  val add : 'a scheduler -> ('a, [< event ]) task -> unit
+  (** Schedule a task. With [domain], only the worker on that domain runs it,
+      and so does every task its handler returns. Raises [Unknown_domain] when
+      no started worker is on that domain or accepts the task's priority, and
+      always on a thread pool, where workers share a domain. *)
+  val add : ?domain:int -> 'a scheduler -> ('a, [< event ]) task -> unit
 end
 
-(** Asynchronous task module
-  *
-  * This module implements an asychronous API to {!Duppy.scheduler}
-  * It allows to create a task that will run and then go to sleep. *)
+(** {2 Direct-style computations}
+
+    [run f] executes [f] so that it can park on {!await} instead of splitting
+    into tasks. It returns as soon as [f] finishes or parks; a parked
+    computation resumes on whichever domain picks up its task, which may not be
+    the one it started on. *)
+val run : (unit -> unit) -> unit
+
+(** [await ~priority s events] parks the calling computation until one of
+    [events] occurs and returns those that did.
+
+    Only a computation running under {!run} can park: calling this from a plain
+    task handler raises [Effect.Unhandled]. *)
+val await :
+  priority:'a -> 'a scheduler -> [< Task.event ] list -> Task.event list
+
+(** [suspend ?delay ~priority s register] parks the calling computation and
+    calls [register] with a function that resumes it. The resumer may be called
+    from any thread or domain; the computation then continues as a task of
+    [priority].
+
+    With [delay], the computation also resumes once [delay] seconds have
+    elapsed. It resumes once, on whichever comes first, and the resumer may then
+    be called any number of times. *)
+val suspend :
+  ?delay:float ->
+  priority:'a ->
+  'a scheduler ->
+  ((unit -> unit) -> unit) ->
+  unit
+
+(** [thread ~priority s fn] runs [fn] on a thread of its own, on the domain of
+    the pool worker that accepts [priority] and has the fewest such threads, so
+    that they spread over the cores.
+
+    On a thread pool, and before the pool has started, the thread is created in
+    place. *)
+val thread : priority:'a -> 'a scheduler -> (unit -> unit) -> unit
+
+(** [blocking fn] runs [fn] and returns its result. A computation that parks
+    inside [fn] blocks the calling thread until what it waits for occurs, and
+    continues on that same thread.
+
+    Use it around code that has to finish on the thread it started on, such as a
+    section that holds a mutex. *)
+val blocking : (unit -> 'a) -> 'a
+
+(** A condition a computation waits for without holding a worker. *)
+module Condition : sig
+  type t
+
+  val create : unit -> t
+
+  (** Wake every waiter, to check what it waits for again. Call it after
+      changing what a waiter checks. *)
+  val signal : t -> unit
+
+  (** [wait ~priority s c ready] returns once [ready ()] holds. Under {!run} it
+      parks the computation, which resumes as a task of [priority]. From any
+      other thread it blocks that thread. *)
+  val wait : priority:'a -> 'a scheduler -> t -> (unit -> bool) -> unit
+end
+
+(** Monotonic seconds with an arbitrary origin, the clock of every delay. *)
+val time : unit -> float
+
+(** [reschedule ?delay ~priority s] parks and resumes the computation under
+    [priority], to leave a priority a computation should no longer hold. *)
+val reschedule : ?delay:float -> priority:'a -> 'a scheduler -> unit
+
+(** Asynchronous task module * * This module implements an asynchronous API to
+    {!Duppy.scheduler} * It allows to create a task that will run and then go to
+    sleep. *)
 module Async : sig
   type t
 
-  (** Exception raised when trying to wake_up a task 
-    * that has been previously stopped *)
+  (** Exception raised when trying to wake_up a task * that has been previously
+      stopped *)
   exception Stopped
 
-  (** [add ~priority s f] creates an asynchronous task in [s] with
-    * priority [priority].
-    *
-    * The task executes the function [f].
-    * If the task returns a positive float, the function will be executed
-    * again after this delay. Otherwise it goes to sleep, and 
-    * you can use [wake_up] to resume the task and execute [f] again. 
-    * Only a single call to [f] is done at each time. 
-    * Multiple [wake_up] while previous task has not 
-    * finished will result in sequentialized calls to [f]. *)
+  (** [add ~priority s f] creates an asynchronous task in [s] with * priority
+      [priority]. * * The task executes the function [f]. * If the task returns
+      a positive float, the function will be executed * again after this delay.
+      Otherwise it goes to sleep, and * you can use [wake_up] to resume the task
+      and execute [f] again. * Only a single call to [f] is done at each time. *
+      Multiple [wake_up] while previous task has not * finished will result in
+      sequentialized calls to [f]. *)
   val add : priority:'a -> 'a scheduler -> (unit -> float) -> t
 
-  (** Wake up an asynchronous task. 
-    * Raises [Stopped] if the task has been stopped. *)
+  (** Wake up an asynchronous task. * Raises [Stopped] if the task has been
+      stopped. *)
   val wake_up : t -> unit
 
-  (** Stop and remove the asynchronous task. Doesn't quit a running task. 
-    * Raises [Stopped] if the task has been stopped. *)
+  (** Stop and remove the asynchronous task. Doesn't quit a running task. *
+      Raises [Stopped] if the task has been stopped. *)
   val stop : t -> unit
 end
 
@@ -167,396 +306,75 @@ end
 module type Transport_t = sig
   type t
 
-  type bigarray =
-    (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
-
   val sock : t -> Unix.file_descr
+
+  (** Whether [read] can return data without [sock] being readable, e.g. bytes a
+      TLS layer already decrypted. *)
+  val pending : t -> bool
+
   val read : t -> Bytes.t -> int -> int -> int
   val write : t -> Bytes.t -> int -> int -> int
-  val ba_write : t -> bigarray -> int -> int -> int
 end
 
-(** Easy parsing of [Unix.file_descr].
-  *
-  * With {!Duppy.Io.read}, you can pass a file descriptor to the scheduler,
-  * along with a marker, and have it run the associated function when the
-  * marker is found.
-  *
-  * With {!Duppy.Io.write}, the schdeduler will try to write recursively to the file descriptor
-  * the given string. *)
+(** Reading and writing a socket from a computation running under {!run}: both
+    park until the socket is ready rather than returning to the scheduler. *)
 module type Io_t = sig
   type socket
 
-  (** Type for markers.
-    *
-    * [Split s] recognizes all regexp allowed by the 
-    * [Pcre] module. *)
+  (** Type for markers. [Split s] recognizes all regexp allowed by the [Re.Pcre]
+      module. *)
   type marker = Length of int | Split of string
 
-  (** Type of [Bigarray] used here. *)
-  type bigarray =
-    (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
-
-  (** Different types of failure.
-    * 
-    * [Io_error] is raised when reading or writing
-    * returned 0. This usually means that the socket
-    * was closed. *)
+  (** Different types of failure. [Io_error] is raised when reading or writing
+      returned 0, which usually means the socket was closed. *)
   type failure =
     | Io_error
-    | Unix of Unix.error * string * string
-    | Unknown of exn
+    | Unix of (Unix.error * string * string * Printexc.raw_backtrace)
+    | Unknown of exn * Printexc.raw_backtrace
     | Timeout
 
-  (** Wrapper to perform a read on a socket and trigger a function when
-    * a marker has been detected, or enough data has been read.
-    * It reads recursively on a socket, splitting into strings seperated
-    * by the marker (if any) and calls the given function on the list of strings.
-    * 
-    * Can be used recursively or not, depending on the way you process strings. 
-    * Because of Unix's semantic, it is not possible to stop reading
-    * at first marker, so there can be a remaining string. If not used
-    * recursively, the second optional argument may contain a remaining
-    * string. You should then initiate the next read with this value.
-    *
-    * The [on_error] function is used when reading failed on the socket.
-    * Depending on your usage, it can be a hard failure, or simply a lost client.
-    * The string passed to [on_error] contains data read before error 
-    * occured.
-    * @param recursive recursively read and process, default: [true]
-    * @param init initial string for reading, default: [""]
-    * @param on_error function used when read failed, default: [fun _ -> ()] 
-    * @param timeout Terminate with [Timeout] failure if nothing has been read
-    *                after the given amout of time in seconds. More precisely,
-    *                the exception is raised when no character have been read
-    *                and the socket was not close while waiting. Default: wait
-    *                forever. *)
-  val read :
-    ?recursive:bool ->
-    ?init:string ->
-    ?on_error:(string * failure -> unit) ->
-    ?timeout:float ->
-    priority:'a ->
-    'a scheduler ->
-    socket ->
-    marker ->
-    (string * string option -> unit) ->
-    unit
+  (** Raised by [read] and [write]. On a read, whatever had been read before the
+      failure is left in the handle's [data]. *)
+  exception Error of failure
 
-  (** Similar to [read] but less complex.
-    * [write ?exec ?on_error ?string ?bigarray ~priority scheduler socket] 
-    * write data from [string], or from [bigarray] if no string is given, 
-    * to [socket], and executes [exec] or [on_error] if errors occured.
-    *
-    * Caveat: on Win32, all file descriptors are expected to be in blocking
-    * mode before being passed to this call due to limitations in the emulation
-    * of the unix/posix API. See code comments for more details.
-    *
-    * @param exec function to execute after writing, default: [fun () -> ()] 
-    * @param on_error function to execute when an error occured, default: [fun _ -> ()] 
-    * @param string write data from this string 
-    * @param bigarray write data from this bigarray, if no [string] is given 
-    * @param timeout Terminate with [Timeout] failure if nothing has been written
-    *                after the given amout of time in seconds. More precisely,
-    *                the exception is raised when no character have been written
-    *                and the socket was not close while waiting. Default: wait
-    *                forever. *)
+  (** [data] holds what a read consumed past its marker, which the next read on
+      the same socket picks up. *)
+  type 'a handle = {
+    scheduler : 'a scheduler;
+    socket : socket;
+    mutable data : string;
+  }
+
+  val handle : 'a scheduler -> socket -> 'a handle
+
+  (** [read ?timeout ~priority h marker] returns the data up to [marker],
+      parking the computation until enough of it has arrived.
+      @param timeout
+        applies to each wait rather than to the call. Default: wait forever. *)
+  val read : ?timeout:float -> priority:'a -> 'a handle -> marker -> string
+
+  (** [write ?timeout ~priority h data] writes all of [data], parking until the
+      socket accepts it.
+      @param timeout
+        applies to each wait rather than to the call. Default: wait forever. *)
   val write :
-    ?exec:(unit -> unit) ->
-    ?on_error:(failure -> unit) ->
-    ?bigarray:bigarray ->
+    ?timeout:float ->
     ?offset:int ->
     ?length:int ->
-    ?string:Bytes.t ->
-    ?timeout:float ->
     priority:'a ->
-    'a scheduler ->
-    socket ->
+    'a handle ->
+    Bytes.t ->
     unit
 end
 
 module MakeIo (Transport : Transport_t) : Io_t with type socket = Transport.t
 module Io : Io_t with type socket = Unix.file_descr
 
-(** Monadic interface to {!Duppy.Io}. 
-  * 
-  * This module can be used to write code
-  * that runs in various Duppy's tasks and
-  * raise values in a completely transparent way.
-  * 
-  * You can see examples of its use
-  * in the [examples/] directory of the
-  * source code and in the files 
-  * [src/tools/{harbor.camlp4,server.camlp4}]
-  * in liquidsoap's code. 
-  * 
-  * When a server communicates
-  * with a client, it performs several
-  * computations and, eventually, terminates.
-  * A computation can either return a new 
-  * value or terminate. For instance:
-  * 
-  * - Client connects.
-  * - Server tries to authenticate the client.
-  * - If authentication is ok, proceed with the next step.
-  * - Otherwise terminate.
-  *
-  * The purpose of the monad is to embed
-  * computations which can either return 
-  * a new value or raise a value that is used
-  * to terminate. *)
-module Monad : sig
-  (** Type representing a computation
-    * which returns a value of type ['a] 
-    * or raises a value of type ['b] *)
-  type ('a, 'b) t
-
-  (** [return x] create a computation that 
-    * returns value [x]. *)
-  val return : 'a -> ('a, 'b) t
-
-  (** [raise x] create a computation that raises
-    * value [x]. *)
-  val raise : 'b -> ('a, 'b) t
-
-  (** Compose two computations. 
-    * [bind f g] is equivalent to:
-    * [let x = f in g x] where [x] 
-   * has f's return type. *)
-  val bind : ('a, 'b) t -> ('a -> ('c, 'b) t) -> ('c, 'b) t
-
-  (** [>>=] is an alternative notation
-    * for [bind] *)
-  val ( >>= ) : ('a, 'b) t -> ('a -> ('c, 'b) t) -> ('c, 'b) t
-
-  (** [run f ~return ~raise ()] executes [f] and process 
-    * returned values with [return] or raised values 
-    * with [raise]. *)
-  val run : return:('a -> unit) -> raise:('b -> unit) -> ('a, 'b) t -> unit
-
-  (** [catch f g] redirects values [x] raised during
-    * [f]'s execution to [g]. The name suggests the
-    * usual [try .. with ..] exception catching. *)
-  val catch : ('a, 'b) t -> ('b -> ('a, 'c) t) -> ('a, 'c) t
-
-  (** [=<<] is an alternative notation for catch. *)
-  val ( =<< ) : ('b -> ('a, 'c) t) -> ('a, 'b) t -> ('a, 'c) t
-
-  (** [fold_left f a [b1; b2; ..]] returns computation 
-    * [ (f a b1) >>= (fun a -> f a b2) >>= ...] *)
-  val fold_left : ('a -> 'b -> ('a, 'c) t) -> 'a -> 'b list -> ('a, 'c) t
-
-  (** [iter f [x1; x2; ..]] returns computation
-    * [f x1 >>= (fun () -> f x2) >>= ...] *)
-  val iter : ('a -> (unit, 'b) t) -> 'a list -> (unit, 'b) t
-
-  (** This module implements monadic 
-    * mutex computations. They can be used
-    * to write blocking code that is compatible
-    * with duppy's tasks, i.e. [Mutex.lock m] blocks
-    * the calling computation and not the calling thread. *)
-  module Mutex : sig
-    (** Information used to initialize a Mutex module. 
-      * [priority] and [scheduler] are used to initialize a task
-      * which treat mutexes as well as conditions from the below
-      * [Condition] module. *)
-    module type Mutex_control = sig
-      type priority
-
-      val scheduler : priority scheduler
-      val priority : priority
-    end
-
-    module type Mutex_t = sig
-      (** Type for a mutex. *)
-      type mutex
-
-      module Control : Mutex_control
-
-      (** [create ()] creates a mutex. *)
-      val create : unit -> mutex
-
-      (** A computation that locks a mutex
-        * and returns [unit] afterwards. Computation
-        * will be blocked until the mutex is sucessfuly locked. *)
-      val lock : mutex -> (unit, 'a) t
-
-      (** A computation that tries to lock a mutex.
-        * Returns immediatly [true] if the mutex was sucesfully locked
-        * or [false] otherwise. *)
-      val try_lock : mutex -> (bool, 'a) t
-
-      (** A computation that unlocks a mutex.
-        * Should return immediatly. *)
-      val unlock : mutex -> (unit, 'a) t
-    end
-
-    module Factory (Control : Mutex_control) : Mutex_t
-  end
-
-  (** This module implements monadic
-    * condition computations. They can be used
-    * to write waiting code that is compatible
-    * with duppy's tasks, i.e. [Condition.wait c m] blocks
-    * the calling computation and not the calling thread
-    * until [Condition.signal c] or [Condition.broadcast c] has 
-    * been called. *)
-  module Condition : sig
-    module Factory (Mutex : Mutex.Mutex_t) : sig
-      (** Type of a condition, used in [wait] and [broadcast] *)
-      type condition
-
-      (** Create a condition. Implementation-wise,
-        * a duppy task is created that will be used to select a
-        * waiting computation, and resume it.
-        * Thus, [priority] and [s] represents, resp., the priority
-        * and scheduler used when running calling process' computation. *)
-      val create : unit -> condition
-
-      (** [wait h m] is a computation that:
-        * {ul
-        * {- Unlock mutex [m]}
-        * {- Wait until [Condition.signal c] or [Condition.broadcast c] 
-             has been called}
-        * {- Locks mutex [m]}
-        * {- Returns [unit]}} *)
-      val wait : condition -> Mutex.mutex -> (unit, 'a) t
-
-      (** [broadcast c] is a computation that 
-        * resumes all computations waiting on [c]. It should
-        * return immediately. *)
-      val broadcast : condition -> (unit, 'a) t
-
-      (** [signal c] is a computation that resumes one 
-        * computation waiting on [c]. It should return
-        * immediately. *)
-      val signal : condition -> (unit, 'a) t
-    end
-  end
-
-  (** This module implements monadic computations
-    * using [Duppy.Io]. It can be used to create
-    * computations that read or write from a socket,
-    * and also to redirect a computation in a different
-    * queue with a new priority. *)
-  module type Monad_io_t = sig
-    type socket
-
-    module Io : Io_t with type socket = socket
-
-    (** {2 Type } *)
-
-    (** A handler for this module
-      * is a record that contains the
-      * required elements. In particular,
-      * [on_error] is a function that transforms
-      * an error raised by [Duppy.Io] to a reply
-      * used to terminate the computation.
-      * [data] is an internal data buffer. It should 
-      * be initialized with [""]. It contains the
-      * remaining data that was received when 
-      * using [read]. If an error occured, 
-      * [data] contain data read before the 
-      * error. *)
-    type ('a, 'b) handler = {
-      scheduler : 'a scheduler;
-      socket : Io.socket;
-      mutable data : string;
-      on_error : Io.failure -> 'b;
-    }
-
-    (** {2 Execution flow } *)
-
-    (** [exec ?delay ~priority h f] redirects computation
-      * [f] into a new queue with priority [priority] and
-      * delay [delay] ([0.] by default).
-      * It can be used to redirect a computation that
-      * has to run under a different priority. For instance,
-      * a computation that reads from a socket is generally
-      * not blocking because the function is executed
-      * only when some data is available for reading. 
-      * However, if the data that is read needs to be processed
-      * by a computation that can be blocking, then one may 
-      * use [exec] to redirect this computation into an 
-      * appropriate queue. *)
-    val exec :
-      ?delay:float ->
-      priority:'a ->
-      ('a, 'b) handler ->
-      ('c, 'b) t ->
-      ('c, 'b) t
-
-    (** [delay ~priority h d] creates a computation that returns
-      * [unit] after delay [d] in seconds. *)
-    val delay : priority:'a -> ('a, 'b) handler -> float -> (unit, 'b) t
-
-    (** {2 Read/write } *)
-
-    (** [read ?timeout ~priority ~marker h] creates a 
-      * computation that reads from [h.socket]
-      * and returns the first string split 
-      * according to [marker]. This function
-      * can be used to create a computation that
-      * reads data from a socket. [timeout] parameter
-      * forces the computation to return an error if
-      * nothing has been read for more than [timeout] 
-      * seconds. Default: wait forever. *)
-    val read :
-      ?timeout:float ->
-      priority:'a ->
-      marker:Io.marker ->
-      ('a, 'b) handler ->
-      (string, 'b) t
-
-    (** [read_all ?timeout ~priority s sock] creates a 
-      * computation that reads all data from [sock]
-      * and returns it. Raised value contains data
-      * read before an error occured. *)
-    val read_all :
-      ?timeout:float ->
-      priority:'a ->
-      'a scheduler ->
-      Io.socket ->
-      (string, string * Io.failure) t
-
-    (** [write ?timeout ~priority h s] creates a computation
-      * that writes string [s] to [h.socket]. This
-      * function can be used to create a computation
-      * that sends data to a socket. [timeout] parameter
-      * forces the computation to return an error if
-      * nothing has been written for more than [timeout] 
-      * seconds. Default: wait forever. *)
-    val write :
-      ?timeout:float ->
-      priority:'a ->
-      ('a, 'b) handler ->
-      ?offset:int ->
-      ?length:int ->
-      Bytes.t ->
-      (unit, 'b) t
-
-    (** [write_bigarray ?timeout ~priority h ba] creates a computation
-      * that writes data from [ba] to [h.socket]. This function
-      * can to create a computation that writes data to a socket. *)
-    val write_bigarray :
-      ?timeout:float ->
-      priority:'a ->
-      ('a, 'b) handler ->
-      Io.bigarray ->
-      (unit, 'b) t
-  end
-
-  module MakeIo (Io : Io_t) :
-    Monad_io_t with type socket = Io.socket and module Io = Io
-
-  module Io : Monad_io_t with type socket = Unix.file_descr and module Io = Io
-end
-
 (** {2 Some culture..}
     * {e Duppy is a Caribbean patois word of West African origin meaning ghost or spirit.
-    * Much of Caribbean folklore revolves around duppies. 
-    * Duppies are generally regarded as malevolent spirits. 
-    * They are said to come out and haunt people at night mostly, 
-    * and people from the islands claim to have seen them. 
+    * Much of Caribbean folklore revolves around duppies.
+    * Duppies are generally regarded as malevolent spirits.
+    * They are said to come out and haunt people at night mostly,
+    * and people from the islands claim to have seen them.
     * The 'Rolling Calf', 'Three footed horse' or 'Old Higue' are examples of the more malicious spirits. }
     * {R {{:http://en.wikipedia.org/wiki/Duppy} http://en.wikipedia.org/wiki/Duppy}}*)

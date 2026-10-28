@@ -1,18 +1,18 @@
-(lang dune 2.7)
-(version 0.9.5)
+(lang dune 3.23)
+(version 1.0.0)
 (name duppy)
 (source (github savonet/ocaml-duppy))
-(license LGPL-2.1-only)
-(authors "Romain Beauxis <toots@rastageeks.org>")
-(maintainers "The Savonet Team <savonet-users@lists.sourceforge.net>")
+(license GPL-2.0-or-later)
+(authors "The Savonet Team <contact@liquidsoap.info>")
+(maintainers "The Savonet Team <contact@liquidsoap.info>")
 
 (generate_opam_files true)
+(subst disabled)
 
 (package
  (name duppy)
- (synopsis "Library providing monadic threads")
+ (synopsis "Task scheduler for OCaml 5 domains")
  (depends
-  (ocaml (>= 4.07.0))
+  (ocaml (>= 5.5))
   dune
-  (re (>= 1.7.2)))
-)
+  (re (>= 1.11.0))))
