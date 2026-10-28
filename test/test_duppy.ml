@@ -1,0 +1,911 @@
+(* The pool dispatches across domains, batches immediate tasks onto one of
+   them, delivers socket events, and lets running tasks finish on stop. *)
+
+type priority = Immediate | Direct | Blocking
+
+let classify = function
+  | Immediate -> `Immediate
+  | Direct -> `Direct
+  | Blocking -> `Threaded
+
+let domain_id () = (Domain.self () :> int)
+
+let fail fmt =
+  Printf.ksprintf
+    (fun s ->
+      prerr_endline ("FAIL: " ^ s);
+      exit 1)
+    fmt
+
+let ok fmt = Printf.ksprintf (fun s -> print_endline ("ok: " ^ s)) fmt
+
+type latch = { m : Mutex.t; c : Condition.t; n : int Atomic.t }
+
+let latch () =
+  { m = Mutex.create (); c = Condition.create (); n = Atomic.make 0 }
+
+let bump l =
+  ignore (Atomic.fetch_and_add l.n 1);
+  Mutex.lock l.m;
+  Condition.broadcast l.c;
+  Mutex.unlock l.m
+
+let await l target =
+  Mutex.lock l.m;
+  while Atomic.get l.n < target do
+    Condition.wait l.c l.m
+  done;
+  Mutex.unlock l.m
+
+(* A hang would otherwise wedge the whole suite. *)
+let watchdog seconds =
+  ignore
+    (Thread.create
+       (fun () ->
+         Thread.delay seconds;
+         prerr_endline "FAIL: timed out";
+         exit 1)
+       ())
+
+let burn n =
+  let x = ref 0.0 in
+  for i = 1 to n do
+    x := Sys.opaque_identity (!x +. sqrt (float_of_int i))
+  done;
+  ignore (Sys.opaque_identity !x)
+
+(* A negative delay is already elapsed when the task is added, so the task is
+   ready before the pool starts rather than reaching it through the poller. *)
+let task priority handler =
+  { Duppy.Task.priority; events = [`Delay (-1.)]; handler }
+
+let ran_on domains =
+  Array.iteri (fun i d -> if d < 0 then fail "task %d never ran" i) domains;
+  List.length (List.sort_uniq compare (Array.to_list domains))
+
+(* One blocking slot per worker, and every task holds its slot until all of
+   them are running: they can only all make progress if each landed on a
+   different worker, so a pool that dispatches to one domain deadlocks here
+   rather than passing. *)
+let test_parallel () =
+  let s = Duppy.create ~classify () in
+  let started = latch () in
+  let finished = latch () in
+  let count = 4 in
+  let domains = Array.make count (-1) in
+  for i = 0 to count - 1 do
+    Duppy.Task.add s
+      (task Blocking (fun _ ->
+           domains.(i) <- domain_id ();
+           bump started;
+           await started count;
+           bump finished;
+           []))
+  done;
+  Duppy.start ~pool:(`Domains count) ~max_blocking:count s;
+  await finished count;
+  Duppy.stop s;
+  let distinct = ran_on domains in
+  if distinct <> count then
+    fail "%d concurrent tasks ran on %d domains, expected %d" count distinct
+      count;
+  ok "%d blocking tasks ran concurrently on %d domains" count distinct
+
+(* Each task holds its worker until all of them run, so they only finish once
+   the pool has grown a domain for each. *)
+let test_growing () =
+  let s = Duppy.create ~classify () in
+  let started = latch () in
+  let finished = latch () in
+  let count = 3 in
+  let domains = Array.make count (-1) in
+  for i = 0 to count - 1 do
+    Duppy.Task.add s
+      (task Direct (fun _ ->
+           domains.(i) <- domain_id ();
+           bump started;
+           await started count;
+           bump finished;
+           []))
+  done;
+  Duppy.start ~pool:(`Growing (1, count)) ~grow_after:0.05 s;
+  await finished count;
+  Duppy.stop s;
+  let distinct = ran_on domains in
+  if distinct <> count then
+    fail "a growing pool ran %d held tasks on %d domains, expected %d" count
+      distinct count;
+  ok "a growing pool grew to %d domains for %d held tasks" distinct count
+
+(* Work that never queues behind a busy worker is no reason to grow. *)
+let test_growing_idle () =
+  let s = Duppy.create ~classify () in
+  Duppy.start ~pool:(`Growing (1, 4)) ~grow_after:0.02 s;
+  let count = 20 in
+  let domains = Array.make count (-1) in
+  for i = 0 to count - 1 do
+    let l = latch () in
+    Duppy.Task.add s
+      (task Direct (fun _ ->
+           domains.(i) <- domain_id ();
+           bump l;
+           []));
+    await l 1;
+    Thread.delay 0.005
+  done;
+  Duppy.stop s;
+  let distinct = ran_on domains in
+  if distinct <> 1 then
+    fail "%d sequential tasks ran on %d domains of a growing pool" count
+      distinct;
+  ok "a growing pool stayed on one domain for %d sequential tasks" count
+
+let test_batch () =
+  let s = Duppy.create ~classify () in
+  let l = latch () in
+  let count = 32 in
+  let domains = Array.make count (-1) in
+  for i = 0 to count - 1 do
+    Duppy.Task.add s
+      (task Immediate (fun _ ->
+           domains.(i) <- domain_id ();
+           bump l;
+           []))
+  done;
+  Duppy.start ~pool:(`Domains 4) s;
+  await l count;
+  Duppy.stop s;
+  let distinct = ran_on domains in
+  if distinct <> 1 then
+    fail "%d immediate tasks spread over %d domains, they were not batched"
+      count distinct;
+  ok "%d immediate tasks ran as one batch" count
+
+let test_io () =
+  let s = Duppy.create ~classify () in
+  let l = latch () in
+  let r, w = Unix.pipe () in
+  Duppy.Task.add s
+    {
+      Duppy.Task.priority = Blocking;
+      events = [`Read r];
+      handler =
+        (fun _ ->
+          ignore (Unix.read r (Bytes.create 4) 0 4);
+          bump l;
+          []);
+    };
+  Duppy.start ~pool:(`Domains 2) s;
+  ignore (Unix.write w (Bytes.of_string "ping") 0 4);
+  await l 1;
+  Duppy.stop s;
+  Unix.close r;
+  Unix.close w;
+  ok "the event loop delivered a socket event"
+
+(* A task that never returns must not keep [stop] from returning: it parks in a
+   syscall on a descriptor the loop has dropped, and stopping joins its domain. *)
+let test_stop_with_stuck_task () =
+  let s = Duppy.create ~classify () in
+  let started = latch () in
+  let release = Atomic.make false in
+  Duppy.Task.add s
+    (task Blocking (fun _ ->
+         bump started;
+         while not (Atomic.get release) do
+           Thread.delay 0.01
+         done;
+         []));
+  Duppy.start ~pool:(`Domains 2) s;
+  await started 1;
+  let t0 = Unix.gettimeofday () in
+  Duppy.stop s;
+  let elapsed = Unix.gettimeofday () -. t0 in
+  Atomic.set release true;
+  if elapsed > 30. then fail "stop took %.1fs with a stuck task" elapsed;
+  ok "stop returned in %.1fs despite a stuck task" elapsed
+
+(* A task is free to start a thread that outlives it, which is what a binding
+   logging from its own thread does. That thread belongs to the domain that ran
+   the task, and a domain does not terminate until its threads have, so
+   stopping must not wait on one. *)
+let test_stop_with_thread_outliving_its_task () =
+  let s = Duppy.create ~classify () in
+  let started = latch () in
+  let release = Atomic.make false in
+  Duppy.Task.add s
+    (task Blocking (fun _ ->
+         ignore
+           (Thread.create
+              (fun () ->
+                while not (Atomic.get release) do
+                  Thread.delay 0.01
+                done)
+              ());
+         bump started;
+         []));
+  Duppy.start ~pool:(`Domains 2) s;
+  await started 1;
+  Thread.delay 0.2;
+  let t0 = Unix.gettimeofday () in
+  Duppy.stop s;
+  let elapsed = Unix.gettimeofday () -. t0 in
+  Atomic.set release true;
+  if elapsed > 30. then
+    fail "stop took %.1fs with a thread outliving its task" elapsed;
+  ok "stop returned in %.1fs with a thread pinning a domain" elapsed
+
+let test_stop_drains () =
+  let count = 8 in
+  for _ = 1 to 5 do
+    let s = Duppy.create ~classify () in
+    let started = latch () in
+    let finished = latch () in
+    for _ = 1 to count do
+      Duppy.Task.add s
+        (task Blocking (fun _ ->
+             bump started;
+             Thread.delay 0.1;
+             bump finished;
+             []))
+    done;
+    Duppy.start ~pool:(`Domains 4) s;
+    await started count;
+    Duppy.stop s;
+    let done_ = Atomic.get finished.n in
+    if done_ < count then
+      fail "stop returned with %d of %d tasks still running" (count - done_)
+        count
+  done;
+  ok "stop drained %d running tasks, 5 times over" count
+
+(* With every worker at its cap, the slot freed by a finishing task has to
+   reach the worker that freed it, or the remaining tasks never get picked up. *)
+let test_blocking_cap () =
+  let s = Duppy.create ~classify () in
+  let l = latch () in
+  let count = 24 in
+  for _ = 1 to count do
+    Duppy.Task.add s
+      (task Blocking (fun _ ->
+           Thread.delay 0.05;
+           bump l;
+           []))
+  done;
+  Duppy.start ~pool:(`Domains 4) ~max_blocking:4 s;
+  await l count;
+  Duppy.stop s;
+  ok "%d blocking tasks all ran with only 4 slots" count
+
+(* Tasks holding their slot until [n] of them run together can only get there
+   if the budget allows [n], so how far they get measures the budget. *)
+let concurrent_blocking s n =
+  let l = latch () in
+  let release = latch () in
+  for _ = 1 to n do
+    Duppy.Task.add s
+      (task Blocking (fun _ ->
+           bump l;
+           await release 1;
+           []))
+  done;
+  let deadline = Unix.gettimeofday () +. 1. in
+  while Atomic.get l.n < n && Unix.gettimeofday () < deadline do
+    Thread.delay 0.01
+  done;
+  let reached = Atomic.get l.n in
+  bump release;
+  await l n;
+  reached
+
+let thread_count () =
+  try Some (Array.length (Sys.readdir "/proc/self/task")) with _ -> None
+
+let test_reserve_blocking () =
+  let s = Duppy.create ~classify () in
+  Duppy.start ~pool:(`Domains 1) ~max_blocking:1 s;
+  if concurrent_blocking s 2 <> 1 then fail "a budget of 1 ran 2 tasks at once";
+  let before = thread_count () in
+  let releases = List.init 3 (fun _ -> Duppy.reserve_blocking s) in
+  if concurrent_blocking s 4 <> 4 then
+    fail "3 reserved slots did not let 4 blocking tasks run at once";
+  List.iter (fun release -> release ()) releases;
+  List.iter (fun release -> release ()) releases;
+  if concurrent_blocking s 2 <> 1 then
+    fail "released slots still let 2 tasks run at once";
+  begin match (before, thread_count ()) with
+    | Some before, Some after when after > before ->
+        fail "auxiliary threads grew from %d to %d after release" before after
+    | _ -> ()
+  end;
+  Duppy.stop s;
+  ok "reserved blocking slots are added and given back"
+
+(* A blocking task whose error [on_error] re-raises still gives its slot back:
+   with one slot, the next blocking task only runs if it did. *)
+let test_raising_blocking_task () =
+  let fatal = Atomic.make 0 in
+  let raised = latch () in
+  let s =
+    Duppy.create ~classify
+      ~on_error:(fun exn bt ->
+        bump raised;
+        Printexc.raise_with_backtrace exn bt)
+      ~on_fatal:(fun _ _ -> Atomic.incr fatal)
+      ()
+  in
+  Duppy.start ~pool:(`Domains 1) ~max_blocking:1 s;
+  let ran = latch () in
+  Duppy.Task.add s (task Blocking (fun _ -> failwith "task error"));
+  await raised 1;
+  Thread.delay 0.1;
+  Duppy.Task.add s
+    (task Blocking (fun _ ->
+         bump ran;
+         []));
+  let deadline = Unix.gettimeofday () +. 2. in
+  while Atomic.get ran.n = 0 && Unix.gettimeofday () < deadline do
+    Thread.delay 0.01
+  done;
+  if Atomic.get ran.n = 0 then
+    fail "a raising blocking task kept its slot and starved the next one";
+  if Atomic.get fatal <> 1 then
+    fail "the unhandled task error reached on_fatal %d times" (Atomic.get fatal);
+  let t0 = Unix.gettimeofday () in
+  Duppy.stop s;
+  if Unix.gettimeofday () -. t0 > 1. then
+    fail "stop waited on the slot of a task that had raised";
+  ok "a blocking task that raises gives its slot back"
+
+(* A computation started here parks on the pool and resumes on one of its
+   workers, which is another domain when the calling one refuses every task. *)
+let test_effect_resumes_elsewhere () =
+  let s = Duppy.create ~classify () in
+  Duppy.start ~pool:(`Selective_domains [(fun _ -> false); (fun _ -> true)]) s;
+  let l = latch () in
+  let before = ref (-1) in
+  let after = ref (-1) in
+  let r, w = Unix.pipe () in
+  Duppy.run (fun () ->
+      before := domain_id ();
+      let events = Duppy.await ~priority:Blocking s [`Read r] in
+      if events <> [`Read r] then fail "await returned the wrong events";
+      ignore (Unix.read r (Bytes.create 4) 0 4);
+      after := domain_id ();
+      bump l);
+  if !after <> -1 then fail "await did not park the computation";
+  ignore (Unix.write w (Bytes.of_string "ping") 0 4);
+  await l 1;
+  Duppy.stop s;
+  Unix.close r;
+  Unix.close w;
+  if !before = !after then
+    fail "computation resumed on its starting domain %d" !before;
+  ok "computation started on domain %d and resumed on %d" !before !after
+
+let test_effect_raises_to_on_error () =
+  let caught = Atomic.make None in
+  let s =
+    Duppy.create ~classify
+      ~on_error:(fun exn _ -> Atomic.set caught (Some exn))
+      ()
+  in
+  Duppy.start ~pool:(`Domains 2) s;
+  let l = latch () in
+  Duppy.run (fun () ->
+      Duppy.reschedule ~priority:Blocking s;
+      bump l;
+      raise Exit);
+  await l 1;
+  Duppy.stop s;
+  match Atomic.get caught with
+    | Some Exit -> ok "an exception after resuming reached on_error"
+    | Some e -> fail "on_error saw %s, expected Exit" (Printexc.to_string e)
+    | None -> fail "an exception after resuming reached nobody"
+
+let test_await_outside_run () =
+  let s = Duppy.create ~classify () in
+  match Duppy.await ~priority:Blocking s [`Delay 0.] with
+    | _ -> fail "await outside run returned instead of raising"
+    | exception Effect.Unhandled _ ->
+        ok "await outside run raises Effect.Unhandled"
+
+(* A lone worker facing a ready list that refills as fast as it drains must
+   still dispatch the other class. *)
+let test_no_starvation () =
+  let s = Duppy.create ~classify () in
+  let stop = Atomic.make false in
+  let blocking_ran = Atomic.make false in
+  let l = latch () in
+  let rec churn _ =
+    if Atomic.get stop then []
+    else
+      [
+        {
+          Duppy.Task.priority = Immediate;
+          events = [`Delay (-1.)];
+          handler = churn;
+        };
+      ]
+  in
+  for _ = 1 to 20 do
+    Duppy.Task.add s (task Immediate churn)
+  done;
+  Duppy.Task.add s
+    (task Blocking (fun _ ->
+         Atomic.set blocking_ran true;
+         bump l;
+         []));
+  Duppy.start ~pool:(`Domains 1) s;
+  await l 1;
+  Atomic.set stop true;
+  Duppy.stop s;
+  if not (Atomic.get blocking_ran) then
+    fail "a flood of immediate tasks starved the blocking one";
+  ok "one worker dispatched blocking work under an immediate flood"
+
+(* A thread pool spawns no domain, and each thread takes only the priorities
+   it accepts. *)
+let test_threads () =
+  let s = Duppy.create ~classify () in
+  let l = latch () in
+  let count = 4 in
+  let ran = Array.make (2 * count) (-1, -1) in
+  let record i _ =
+    ran.(i) <- (domain_id (), Thread.id (Thread.self ()));
+    bump l;
+    []
+  in
+  for i = 0 to count - 1 do
+    Duppy.Task.add s (task Immediate (record i));
+    Duppy.Task.add s (task Blocking (record (count + i)))
+  done;
+  Duppy.start
+    ~pool:(`Threads [(fun p -> p = Immediate); (fun p -> p = Blocking)])
+    s;
+  await l (2 * count);
+  Duppy.stop s;
+  let threads_of prio =
+    List.sort_uniq compare
+      (List.map snd (Array.to_list (Array.sub ran (prio * count) count)))
+  in
+  Array.iter
+    (fun (d, _) ->
+      if d <> domain_id () then
+        fail "a task ran on domain %d, not the main one" d)
+    ran;
+  (match (threads_of 0, threads_of 1) with
+    | [a], [b] when a <> b -> ()
+    | _ -> fail "tasks did not each stay on the thread accepting their priority");
+  ok "%d tasks ran on the main domain, one thread per priority" (2 * count)
+
+(* A worker that takes a blocking task goes back to idle while its auxiliary
+   thread runs it, so it sits at the front of the idle list at its own
+   capacity. The next blocking task must not be stranded on it while other
+   workers are free. *)
+let test_capacity_hands_off () =
+  let s = Duppy.create ~classify () in
+  Duppy.start ~pool:(`Domains 4) ~max_blocking:4 s;
+  let held = latch () in
+  let extra = latch () in
+  Duppy.Task.add s
+    (task Blocking (fun _ ->
+         bump held;
+         Thread.delay 2.;
+         []));
+  await held 1;
+  (* Let the worker finish declining and settle at the front of the idle list. *)
+  Thread.delay 0.3;
+  Duppy.Task.add s
+    (task Blocking (fun _ ->
+         bump extra;
+         []));
+  let deadline = Unix.gettimeofday () +. 1. in
+  while Atomic.get extra.n = 0 && Unix.gettimeofday () < deadline do
+    Thread.delay 0.01
+  done;
+  if Atomic.get extra.n = 0 then
+    fail "a blocking task was stranded on a worker already at its capacity";
+  ok "a worker at capacity hands ready blocking work to a free one";
+  Duppy.stop s
+
+(* A batch of immediate tasks is taken while a direct task is ready. The direct
+   one is neither run nor left behind by a ready list rebuilt from the classes
+   the batch did not cover. *)
+let test_direct_survives_a_batch () =
+  let s = Duppy.create ~classify () in
+  let ran = latch () in
+  Duppy.Task.add s
+    (task Direct (fun _ ->
+         bump ran;
+         []));
+  for _ = 1 to 20 do
+    Duppy.Task.add s (task Immediate (fun _ -> []))
+  done;
+  Duppy.start ~pool:(`Domains 1) s;
+  let deadline = Unix.gettimeofday () +. 2. in
+  while Atomic.get ran.n = 0 && Unix.gettimeofday () < deadline do
+    Thread.delay 0.01
+  done;
+  if Atomic.get ran.n = 0 then fail "a direct task was dropped by a batch";
+  ok "a direct task survives an immediate batch";
+  Duppy.stop s
+
+(* A pinned task and every task its handler returns run on the worker for that
+   domain, found the way script code finds it: by asking from inside an
+   unpinned task. A pin naming no worker is refused rather than left waiting. *)
+let test_pinned () =
+  let s = Duppy.create ~classify () in
+  (match Duppy.Task.add ~domain:0 s (task Immediate (fun _ -> [])) with
+    | () -> fail "a pin was accepted before the pool started"
+    | exception Duppy.Unknown_domain _ -> ());
+  Duppy.start ~pool:(`Domains 4) s;
+  (match Duppy.Task.add ~domain:9999 s (task Immediate (fun _ -> [])) with
+    | () -> fail "a pin to a domain with no worker was accepted"
+    | exception Duppy.Unknown_domain 9999 -> ());
+  let home = Atomic.make (-1) in
+  let seen = latch () in
+  Duppy.Task.add s
+    (task Direct (fun _ ->
+         Atomic.set home (domain_id ());
+         bump seen;
+         []));
+  await seen 1;
+  let home = Atomic.get home in
+  (* Immediate tasks are the ones a batch could carry off to the wrong worker. *)
+  let runs = 20 in
+  let where = Array.make runs (-1) in
+  let finished = latch () in
+  let rec hop i _ =
+    where.(i) <- domain_id ();
+    bump finished;
+    if i + 1 < runs then [task Immediate (hop (i + 1))] else []
+  in
+  Duppy.Task.add ~domain:home s (task Immediate (hop 0));
+  await finished runs;
+  Array.iteri
+    (fun i d ->
+      if d <> home then fail "rerun %d ran on domain %d instead of %d" i d home)
+    where;
+  ok "a pinned task and its %d reruns all ran on domain %d" (runs - 1) home;
+  Duppy.stop s
+
+(* The calling domain is the pool's first worker, so a task can be pinned to
+   it. *)
+let test_current_domain () =
+  let here = domain_id () in
+  let s = Duppy.create ~classify () in
+  Duppy.start ~pool:(`Domains 2) s;
+  let ran_on = Atomic.make (-1) in
+  let seen = latch () in
+  Duppy.Task.add ~domain:here s
+    (task Immediate (fun _ ->
+         Atomic.set ran_on (domain_id ());
+         bump seen;
+         []));
+  await seen 1;
+  if Atomic.get ran_on <> here then
+    fail "pinned to the calling domain %d, ran on %d" here (Atomic.get ran_on);
+  ok "the calling domain %d takes tasks as a pool worker" here;
+  Duppy.stop s
+
+(* Says which backend ran, so a run meant for the fallback shows it used it. *)
+let test_backend () =
+  let s = Duppy.create ~classify () in
+  let started = ref "" in
+  Duppy.start ~pool:(`Domains 1) ~log:(fun m -> started := m) s;
+  Duppy.stop s;
+  print_endline !started
+
+(* A regular file is refused by epoll and always readable elsewhere: either way
+   its wait fires at once, and must not report the quiet pipe beside it. *)
+let test_unwatchable_descriptor () =
+  let s = Duppy.create ~classify () in
+  let l = latch () in
+  let file = Unix.openfile Sys.executable_name [Unix.O_RDONLY] 0 in
+  let r, w = Unix.pipe () in
+  let fired = ref [] in
+  Duppy.Task.add s
+    {
+      Duppy.Task.priority = Blocking;
+      events = [`Read file; `Read r];
+      handler =
+        (fun events ->
+          fired := events;
+          bump l;
+          []);
+    };
+  Duppy.start ~pool:(`Domains 1) s;
+  await l 1;
+  Duppy.stop s;
+  List.iter Unix.close [file; r; w];
+  if !fired <> [`Read file] then
+    fail "a wait on a file reported %d events" (List.length !fired);
+  ok "a descriptor that cannot be watched reports its own events only"
+
+let test_suspend () =
+  let s = Duppy.create ~classify () in
+  Duppy.start ~pool:(`Domains 1) s;
+  let l = latch () in
+  let resume = ref (fun () -> fail "suspend never registered") in
+  let resumed = Atomic.make false in
+  Duppy.run (fun () ->
+      Duppy.suspend ~priority:Blocking s (fun wake -> resume := wake);
+      Atomic.set resumed true;
+      bump l);
+  if Atomic.get resumed then fail "suspend did not park the computation";
+  !resume ();
+  await l 1;
+  Duppy.stop s;
+  ok "a suspended computation resumes when woken"
+
+let test_suspend_delay () =
+  let s = Duppy.create ~classify () in
+  Duppy.start ~pool:(`Domains 1) s;
+  let l = latch () in
+  let resume = ref (fun () -> ()) in
+  let resumed_at = Array.make 2 0. in
+  let park i delay =
+    Duppy.run (fun () ->
+        Duppy.suspend ~delay ~priority:Direct s (fun wake -> resume := wake);
+        resumed_at.(i) <- Duppy.time ();
+        bump l)
+  in
+  let t0 = Duppy.time () in
+  park 0 0.1;
+  (* Called after the delay too: a second resume would fail the continuation. *)
+  let on_time = !resume in
+  await l 1;
+  on_time ();
+  let waited = resumed_at.(0) -. t0 in
+  if waited < 0.1 || waited > 0.5 then
+    fail "a 0.1s suspension resumed after %.3fs" waited;
+  let t0 = Duppy.time () in
+  park 1 10.;
+  !resume ();
+  await l 2;
+  if resumed_at.(1) -. t0 > 1. then fail "the resumer did not end the delay";
+  Thread.delay 0.05;
+  Duppy.stop s;
+  ok "a suspension with a delay resumes once, at the delay or when woken"
+
+let test_thread () =
+  let s = Duppy.create ~classify () in
+  Duppy.start ~pool:(`Domains 2) s;
+  let l = latch () in
+  let hold = latch () in
+  let where = Array.make 4 (-1) in
+  Array.iteri
+    (fun i _ ->
+      Duppy.thread ~priority:Blocking s (fun () ->
+          where.(i) <- domain_id ();
+          bump l;
+          await hold 1))
+    where;
+  await l 4;
+  let on d = List.length (List.filter (( = ) d) (Array.to_list where)) in
+  if ran_on where <> 2 || on where.(0) <> 2 then
+    fail "4 threads were not spread evenly over 2 domains";
+  bump hold;
+  Duppy.stop s;
+  ok "threads spread evenly over the pool's domains"
+
+(* One worker: the waiter parks, or the task that makes its condition true
+   never runs. *)
+let test_condition_parks () =
+  let s = Duppy.create ~classify () in
+  Duppy.start ~pool:(`Domains 1) s;
+  let l = latch () in
+  let condition = Duppy.Condition.create () in
+  let ready = Atomic.make false in
+  Duppy.Task.add s
+    (task Direct (fun _ ->
+         Duppy.run (fun () ->
+             Duppy.Condition.wait ~priority:Direct s condition (fun () ->
+                 Atomic.get ready);
+             bump l);
+         []));
+  Duppy.Task.add s
+    (task Direct (fun _ ->
+         Atomic.set ready true;
+         Duppy.Condition.signal condition;
+         []));
+  await l 1;
+  Duppy.stop s;
+  ok "a computation waiting for a condition gives its worker back"
+
+(* [run] returns when its computation parks or ends: it returns with the
+   computation finished only if the wait inside [blocking] did not park. *)
+let test_blocking () =
+  let s = Duppy.create ~classify () in
+  Duppy.start ~pool:(`Domains 1) s;
+  let condition = Duppy.Condition.create () in
+  let ready = Atomic.make false in
+  let finished = ref false in
+  Duppy.Task.add s
+    {
+      (task Direct (fun _ ->
+           Atomic.set ready true;
+           Duppy.Condition.signal condition;
+           []))
+      with
+      events = [`Delay 0.05];
+    };
+  Duppy.run (fun () ->
+      Duppy.blocking (fun () ->
+          Duppy.Condition.wait ~priority:Direct s condition (fun () ->
+              Atomic.get ready));
+      finished := true);
+  if not !finished then fail "a wait inside a blocking section parked";
+  Duppy.stop s;
+  ok "a wait inside a blocking section blocks its thread"
+
+let test_condition_blocks_a_thread () =
+  let s = Duppy.create ~classify () in
+  let condition = Duppy.Condition.create () in
+  let ready = Atomic.make false in
+  let waited = Atomic.make false in
+  let waiter =
+    Thread.create
+      (fun () ->
+        Duppy.Condition.wait ~priority:Blocking s condition (fun () ->
+            Atomic.get ready);
+        Atomic.set waited true)
+      ()
+  in
+  Thread.delay 0.05;
+  if Atomic.get waited then fail "a wait returned before its condition held";
+  Atomic.set ready true;
+  Duppy.Condition.signal condition;
+  Thread.join waiter;
+  ok "a thread waiting for a condition blocks until it holds"
+
+(* The scheduler is still referenced after its stop, so a handler it dropped
+   is only collected if stop let go of it.
+
+   The call is opaque because flambda otherwise keeps [payload] alive. *)
+let test_stop_releases_handlers () =
+  let s = Duppy.create ~classify () in
+  Duppy.start ~pool:(`Domains 1) s;
+  let held = Weak.create 1 in
+  let add () =
+    let payload = Bytes.create 64 in
+    Weak.set held 0 (Some payload);
+    Duppy.Task.add s
+      {
+        Duppy.Task.priority = Blocking;
+        events = [`Delay 1000.];
+        handler =
+          (fun _ ->
+            ignore (Sys.opaque_identity payload);
+            []);
+      }
+  in
+  (Sys.opaque_identity add) ();
+  Duppy.stop s;
+  Gc.full_major ();
+  Gc.full_major ();
+  if Weak.check held 0 then fail "stop kept the handler of a dropped task";
+  ignore (Sys.opaque_identity s);
+  ok "stop releases the handlers of the tasks it drops"
+
+(* Each priority has one domain accepting it, so its tasks all run there even
+   though they queue faster than that one domain runs them. *)
+let test_selective_domains () =
+  let s = Duppy.create ~classify () in
+  Duppy.start
+    ~pool:(`Selective_domains [(fun p -> p = Immediate); (fun p -> p = Direct)])
+    s;
+  let runs = 40 in
+  let immediate = Array.make runs (-1) and direct = Array.make runs (-1) in
+  let finished = latch () in
+  let record where i _ =
+    where.(i) <- domain_id ();
+    Thread.delay 0.002;
+    bump finished;
+    []
+  in
+  for i = 0 to runs - 1 do
+    Duppy.Task.add s (task Immediate (record immediate i));
+    Duppy.Task.add s (task Direct (record direct i))
+  done;
+  await finished (2 * runs);
+  if ran_on immediate <> 1 || ran_on direct <> 1 then
+    fail "a selective domain took a task it does not accept";
+  if immediate.(0) = direct.(0) then
+    fail "both priorities ran on domain %d" direct.(0);
+  Duppy.stop s;
+  ok "selective domains ran %d tasks each, on domains %d and %d" runs
+    immediate.(0) direct.(0)
+
+(* Linux only: where threads cannot be counted the check says so rather than
+   pass. *)
+let thread_count () =
+  try Some (Array.length (Sys.readdir "/proc/self/task"))
+  with Sys_error _ -> None
+
+(* One worker alone accepts the tasks, so it holds the whole budget at once;
+   it keeps only its share of the threads that took. *)
+let test_burst_threads_retire () =
+  match thread_count () with
+    | None -> print_endline "skipped: threads cannot be counted here"
+    | Some _ ->
+        let s = Duppy.create ~classify () in
+        let budget = 16 in
+        Duppy.start
+          ~pool:(`Selective_domains [(fun _ -> false); (fun _ -> true)])
+          ~max_blocking:budget s;
+        (* The first task brings up one auxiliary thread and whatever the
+           runtime starts along with a domain's first thread. *)
+        let warm = latch () in
+        Duppy.Task.add s
+          (task Blocking (fun _ ->
+               bump warm;
+               []));
+        await warm 1;
+        Thread.delay 0.05;
+        let baseline = Option.get (thread_count ()) - 1 in
+        let started = latch () and finished = latch () in
+        let release = latch () in
+        for _ = 1 to budget do
+          Duppy.Task.add s
+            (task Blocking (fun _ ->
+                 bump started;
+                 await release 1;
+                 bump finished;
+                 []))
+        done;
+        await started budget;
+        let peak = Option.get (thread_count ()) in
+        bump release;
+        await finished budget;
+        if peak < baseline + budget then
+          fail "%d tasks in flight on %d threads" budget (peak - baseline);
+        let kept = budget / 2 in
+        let deadline = Unix.gettimeofday () +. 2. in
+        while
+          Option.get (thread_count ()) > baseline + kept
+          && Unix.gettimeofday () < deadline
+        do
+          Thread.delay 0.01
+        done;
+        let parked = Option.get (thread_count ()) - baseline in
+        if parked > kept then
+          fail "%d threads stayed parked, %d expected" parked kept;
+        Duppy.stop s;
+        ok "a burst of %d blocking tasks left %d threads parked" budget parked
+
+let () =
+  watchdog 60.;
+  test_backend ();
+  test_threads ();
+  test_parallel ();
+  test_growing ();
+  test_growing_idle ();
+  test_batch ();
+  test_io ();
+  test_blocking_cap ();
+  test_reserve_blocking ();
+  test_raising_blocking_task ();
+  test_stop_drains ();
+  test_stop_with_thread_outliving_its_task ();
+  test_stop_with_stuck_task ();
+  test_effect_resumes_elsewhere ();
+  test_effect_raises_to_on_error ();
+  test_await_outside_run ();
+  test_no_starvation ();
+  test_capacity_hands_off ();
+  test_direct_survives_a_batch ();
+  test_pinned ();
+  test_current_domain ();
+  test_selective_domains ();
+  test_burst_threads_retire ();
+  test_unwatchable_descriptor ();
+  test_suspend ();
+  test_suspend_delay ();
+  test_thread ();
+  test_condition_parks ();
+  test_blocking ();
+  test_condition_blocks_a_thread ();
+  test_stop_releases_handlers ();
+  print_endline "all duppy pool checks passed"

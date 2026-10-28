@@ -1,11 +1,6 @@
 name: CI
 
-on:
-  merge_group:
-  pull_request:
-  push:
-    branches:
-      - main
+on: [push]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,29 +10,14 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        ocaml-compiler:
-          - 4.14
-          - 5.3
-        include:
-          - ocaml-compiler: 5.3
-            os: ubuntu-latest
-            upload-doc: true
+        os: [macos-latest, ubuntu-24.04]
+        compiler: [5.5.0]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Use OCaml ${{ matrix.ocaml-compiler }}
-        uses: ocaml/setup-ocaml@v3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Build and test module
+        uses: savonet/build-and-test-ocaml-module@681b8ba0c5f5e2e98869bb3672338c65c56e1b24 # main
         with:
-          ocaml-compiler: ${{ matrix.ocaml-compiler }}
-
-      - name: Install locally
-        run: opam install . --deps-only --with-test
-
-      - name: Build locally
-        run: opam exec -- dune build
-
-      - name: Run tests locally
-        run: opam exec -- dune runtest
+          ocaml-compiler: ${{ matrix.compiler }}

@@ -1,5 +1,3 @@
-### ⚠️ The development on this module has stopped! Its features have bee added to liquidsoap internally. Feel free to contact us if you are interested in a stand-alone module ⚠️
-
 # ocaml-duppy
 
 ocaml-duppy is an advanced scheduler for Ocaml programmers.
@@ -12,10 +10,9 @@ The API is documented here: https://www.liquidsoap.info/ocaml-duppy/
 
 ## Prerequisites:
 
-- ocaml
-- findlib
+- ocaml >= 5.5
 - ocaml-re
-- dune
+- dune >= 3.23
 
 ## Compilation:
 
@@ -35,6 +32,7 @@ $ opam install duppy
 ```
 
 Via `dune` (for developers):
+
 ```sh
 $ dune install
 ```
@@ -45,4 +43,4 @@ appropriate place.
 ## Author:
 
 This author of this software may be contacted by electronic mail
-at the following address: savonet-users@lists.sourceforge.net.
+at the following address: contact@liquidsoap.info.
